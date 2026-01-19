@@ -57,6 +57,10 @@ teardown-kind:
 test-kind:
 	@./scripts/kind/test-deployment.sh
 
+## test-signature: Run signature verification tests against the kind cluster
+test-signature:
+	@./scripts/kind/test-signature-verification.sh
+
 ## help: Show this help message
 help:
 	@echo "Usage: make [target]"

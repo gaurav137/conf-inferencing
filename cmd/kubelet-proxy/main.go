@@ -25,6 +25,7 @@ func run() int {
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "Path to TLS certificate file for serving")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "Path to TLS key file for serving")
 	flag.StringVar(&cfg.AdmissionPolicyFile, "admission-policy", "", "Path to admission policy file (optional)")
+	flag.StringVar(&cfg.SignatureVerificationCert, "signature-verification-cert", "", "Path to public key certificate for verifying pod spec signatures (optional)")
 	flag.BoolVar(&cfg.LogRequests, "log-requests", true, "Log all proxied requests")
 	flag.BoolVar(&cfg.LogPodPayloads, "log-pod-payloads", false, "Log full pod payloads for pod creation requests")
 	flag.Parse()
@@ -42,17 +43,38 @@ func run() int {
 	}
 
 	// Create admission controller
-	var admissionController admission.Controller
+	var controllers []admission.Controller
+
+	// Add signature verification controller if configured
+	if cfg.SignatureVerificationCert != "" {
+		sigController, err := admission.NewSignatureVerificationController(cfg.SignatureVerificationCert)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading signature verification cert: %v\n", err)
+			return 1
+		}
+		controllers = append(controllers, sigController)
+	}
+
+	// Add policy controller if configured
 	if cfg.AdmissionPolicyFile != "" {
-		var err error
-		admissionController, err = admission.NewPolicyController(cfg.AdmissionPolicyFile)
+		policyController, err := admission.NewPolicyController(cfg.AdmissionPolicyFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading admission policy: %v\n", err)
 			return 1
 		}
-	} else {
+		controllers = append(controllers, policyController)
+	}
+
+	// Build the final admission controller
+	var admissionController admission.Controller
+	if len(controllers) == 0 {
 		// Default to allowing all pods but logging them
 		admissionController = admission.NewLoggingController()
+	} else if len(controllers) == 1 {
+		admissionController = controllers[0]
+	} else {
+		// Chain multiple controllers together
+		admissionController = admission.NewChainController(controllers...)
 	}
 
 	// Create and configure proxy
@@ -80,6 +102,7 @@ func run() int {
 	fmt.Printf("  Listening on: %s\n", cfg.ListenAddr)
 	fmt.Printf("  API Server: %s\n", cfg.LoadedKubeConfig.Server)
 	fmt.Printf("  TLS: %v\n", cfg.TLSCertFile != "")
+	fmt.Printf("  Signature Verification: %v\n", cfg.SignatureVerificationCert != "")
 
 	if err := proxy.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running proxy: %v\n", err)

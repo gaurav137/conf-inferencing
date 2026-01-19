@@ -125,6 +125,72 @@ On the node, configure the kubelet to connect to kubelet-proxy instead of the AP
 | `--admission-policy` | | Path to admission policy JSON file |
 | `--log-requests` | `true` | Log all proxied requests |
 | `--log-pod-payloads` | `false` | Log full pod JSON payloads |
+| `--signature-verification-cert` | | Path to certificate for pod spec signature verification |
+
+### Signature Verification
+
+kubelet-proxy can verify cryptographic signatures on pod specs to ensure only authorized workloads run on a node. When enabled, pods must have a valid signature annotation or they will be rejected.
+
+#### How It Works
+
+1. The pod spec (`.spec` field) is serialized to canonical JSON (sorted keys, no whitespace)
+2. The JSON is hashed with SHA256
+3. The hash is signed with the private key (ECDSA or RSA)
+4. The base64-encoded signature is stored in the `kubelet-proxy.io/signature` annotation
+5. On the node, kubelet-proxy verifies the signature using the public key from the provided certificate
+
+#### Enabling Signature Verification
+
+Provide a certificate containing the public key:
+
+```bash
+./bin/kubelet-proxy \
+  --kubeconfig /path/to/kubeconfig \
+  --signature-verification-cert /path/to/signing-cert.pem
+```
+
+#### Signing Pods
+
+Use the included helper script to generate keys and sign pods:
+
+```bash
+# Generate ECDSA signing keys
+./scripts/sign-pod.sh generate-keys
+
+# Sign a pod spec (outputs signed YAML to stdout)
+./scripts/sign-pod.sh sign-spec my-pod.yaml > my-pod-signed.yaml
+
+# Verify a signed pod
+./scripts/sign-pod.sh verify-spec my-pod-signed.yaml
+```
+
+Or manually sign using OpenSSL:
+
+```bash
+# Extract and canonicalize spec
+SPEC=$(yq -o json '.spec' my-pod.yaml | jq -cS .)
+
+# Sign with ECDSA key
+SIGNATURE=$(echo -n "$SPEC" | openssl dgst -sha256 -sign signing-key.pem | base64 -w0)
+
+# Add annotation to pod
+yq ".metadata.annotations.\"kubelet-proxy.io/signature\" = \"$SIGNATURE\"" my-pod.yaml
+```
+
+#### Signature Annotation
+
+The signature is stored in the pod annotation:
+
+```yaml
+metadata:
+  annotations:
+    kubelet-proxy.io/signature: "MEUCIQDx...base64-encoded-signature..."
+```
+
+#### Supported Key Types
+
+- **ECDSA** (recommended): P-256, P-384, P-521 curves
+- **RSA**: PKCS#1 v1.5 signatures
 
 ### Admission Policies
 
@@ -172,9 +238,18 @@ Create a JSON policy file to define admission rules. See [examples/admission-pol
 │       │   ├── admission.go    # Core admission types
 │       │   ├── chain.go        # Chain multiple controllers
 │       │   ├── logging.go      # Logging controller
-│       │   └── policy.go       # Policy-based controller
+│       │   ├── policy.go       # Policy-based controller
+│       │   └── signature.go    # Signature verification controller
 │       ├── config.go           # Configuration
+│       ├── kubeconfig.go       # Kubeconfig parser
 │       └── proxy.go            # HTTP proxy implementation
+├── scripts/
+│   ├── kind/                   # Kind cluster deployment scripts
+│   │   ├── deploy-kind.sh      # Deploy to kind cluster
+│   │   ├── teardown-kind.sh    # Remove kind cluster
+│   │   ├── test-deployment.sh  # Test basic deployment
+│   │   └── test-signature-verification.sh  # Test signature verification
+│   └── sign-pod.sh             # Pod signing helper script
 ├── examples/
 │   ├── admission-policy.json   # Sample admission policy
 │   └── strict-admission-policy.json
@@ -184,3 +259,27 @@ Create a JSON policy file to define admission rules. See [examples/admission-pol
 ├── go.mod
 └── README.md
 ```
+
+## Testing with Kind
+
+Deploy kubelet-proxy to a local kind cluster for testing:
+
+```bash
+# Deploy to kind cluster (2 nodes: control-plane + worker)
+make deploy-kind
+
+# Run basic admission tests
+make test-kind
+
+# Test signature verification
+./scripts/kind/test-signature-verification.sh
+
+# Tear down cluster
+make teardown-kind
+```
+
+The kind deployment:
+- Creates a 2-node cluster (control-plane + worker)
+- Installs kubelet-proxy on the worker node only
+- Configures kubelet to route through the proxy
+- Sets up a policy that blocks pods in `blocked-*` namespaces
