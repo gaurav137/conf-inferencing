@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build release artifacts
+        run: make release VERSION=${{ steps.version.outputs.VERSION }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          files: |
+            dist/kubelet-proxy-linux-amd64.tar.gz
+            dist/kubelet-proxy-linux-amd64.tar.gz.sha256
+            dist/kubelet-proxy-linux-arm64.tar.gz
+            dist/kubelet-proxy-linux-arm64.tar.gz.sha256
+          body: |
+            ## kubelet-proxy ${{ steps.version.outputs.VERSION }}
+            
+            ### Installation
+            
+            ```bash
+            # Download and extract (amd64)
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/kubelet-proxy-linux-amd64.tar.gz
+            tar -xzf kubelet-proxy-linux-amd64.tar.gz
+            sudo mv kubelet-proxy /usr/local/bin/
+            
+            # Verify
+            kubelet-proxy --help
+            ```
+            
+            ### Checksums
+            
+            See the `.sha256` files for checksums.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

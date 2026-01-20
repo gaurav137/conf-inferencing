@@ -30,3 +30,7 @@ Thumbs.db
 # vendor/
 
 tmp/
+dist/kubelet-proxy-linux-amd64.tar.gz
+dist/kubelet-proxy-linux-amd64.tar.gz.sha256
+dist/kubelet-proxy-linux-arm64.tar.gz
+dist/kubelet-proxy-linux-arm64.tar.gz.sha256
