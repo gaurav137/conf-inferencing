@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -36,8 +38,62 @@ jobs:
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${{ steps.version.outputs.VERSION }}
+          
+          echo "Previous tag: $PREVIOUS_TAG"
+          echo "Current tag: $CURRENT_TAG"
+          
+          # Generate changelog
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # First release - get all commits
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            # Get commits between tags
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          # Save to file (handles multiline)
+          echo "$CHANGELOG" > /tmp/changelog.txt
+          
+          # Also output for debugging
+          echo "Changelog:"
+          echo "$CHANGELOG"
+
       - name: Build release artifacts
         run: make release VERSION=${{ steps.version.outputs.VERSION }}
+
+      - name: Prepare release notes
+        run: |
+          cat > /tmp/release-notes.txt << 'NOTES'
+          ## kubelet-proxy ${{ steps.version.outputs.VERSION }}
+          
+          ### What's Changed
+          
+          NOTES
+          cat /tmp/changelog.txt >> /tmp/release-notes.txt
+          cat >> /tmp/release-notes.txt << 'NOTES'
+          
+          ### Installation
+          
+          ```bash
+          # Download and extract (amd64)
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/kubelet-proxy-linux-amd64.tar.gz
+          tar -xzf kubelet-proxy-linux-amd64.tar.gz
+          sudo mv kubelet-proxy /usr/local/bin/
+          
+          # Verify
+          kubelet-proxy --help
+          ```
+          
+          ### Checksums
+          
+          See the `.sha256` files for checksums.
+          NOTES
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -51,23 +107,6 @@ jobs:
             dist/kubelet-proxy-linux-amd64.tar.gz.sha256
             dist/kubelet-proxy-linux-arm64.tar.gz
             dist/kubelet-proxy-linux-arm64.tar.gz.sha256
-          body: |
-            ## kubelet-proxy ${{ steps.version.outputs.VERSION }}
-            
-            ### Installation
-            
-            ```bash
-            # Download and extract (amd64)
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/kubelet-proxy-linux-amd64.tar.gz
-            tar -xzf kubelet-proxy-linux-amd64.tar.gz
-            sudo mv kubelet-proxy /usr/local/bin/
-            
-            # Verify
-            kubelet-proxy --help
-            ```
-            
-            ### Checksums
-            
-            See the `.sha256` files for checksums.
+          body_path: /tmp/release-notes.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
