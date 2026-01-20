@@ -336,12 +336,22 @@ func (p *Proxy) filterPodResponse(body []byte) []byte {
 		}
 
 	case "Pod":
-		if !p.admitPod(response) {
-			// Return empty or error for rejected single pod
-			return p.createPodRejectedResponse(response)
+		// Check if pod is already in terminal state
+		phase := getPodPhase(response)
+		if phase != "Succeeded" && phase != "Failed" {
+			decision := p.evaluatePodAdmission(response)
+			if !decision.Allowed {
+				namespace, name := getPodIdentifier(response)
+				podKey := fmt.Sprintf("%s/%s", namespace, name)
+				p.logger.Printf("REJECTED (get): Pod %s - %s", podKey, decision.Reason)
+
+				// Use the same rejection pattern as list/watch
+				go p.rejectPodViaStatus(namespace, name, decision.Reason)
+			}
 		}
 	}
 
+	// Always return the pod - the status patch handles rejection
 	return body
 }
 
@@ -570,35 +580,6 @@ func (p *Proxy) rejectPodViaStatus(namespace, name, reason string) {
 		body, _ := io.ReadAll(resp.Body)
 		p.logger.Printf("Failed to patch pod status (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-}
-
-// admitPod checks if a pod should be admitted to run on this node (used by filterPodItems)
-func (p *Proxy) admitPod(pod map[string]interface{}) bool {
-	// Don't re-evaluate pods that are already in a terminal state
-	if phase := getPodPhase(pod); phase == "Succeeded" || phase == "Failed" {
-		return true
-	}
-
-	decision := p.evaluatePodAdmission(pod)
-	return decision.Allowed
-}
-
-// createPodRejectedResponse creates a response indicating the pod was rejected
-func (p *Proxy) createPodRejectedResponse(pod map[string]interface{}) []byte {
-	namespace, name := getPodIdentifier(pod)
-
-	response := map[string]interface{}{
-		"kind":       "Status",
-		"apiVersion": "v1",
-		"metadata":   map[string]interface{}{},
-		"status":     "Failure",
-		"message":    fmt.Sprintf("pod %s/%s rejected by kubelet-proxy policy", namespace, name),
-		"reason":     "Forbidden",
-		"code":       403,
-	}
-
-	body, _ := json.Marshal(response)
-	return body
 }
 
 // Helper functions
