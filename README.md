@@ -248,7 +248,7 @@ curl http://localhost:8080/signingcert > signing-cert.pem
 │   ├── kind/                   # Kind cluster deployment scripts
 │   │   ├── deploy-kind.sh      # Deploy to kind cluster
 │   │   ├── teardown-kind.sh    # Remove kind cluster
-│   │   └── test-signature-verification.sh  # Test signature verification
+│   │   └── test-pod-policies.sh  # Test pod policy verification
 │   └── sign-pod.sh             # Pod signing helper script
 ├── Dockerfile.signing-server   # Dockerfile for signing-server
 ├── examples/                   # Example configurations

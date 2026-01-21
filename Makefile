@@ -96,7 +96,7 @@ test-kind: test-signature
 
 ## test-signature: Run signature verification tests against the kind cluster
 test-signature:
-	@./scripts/kind/test-signature-verification.sh
+	@./scripts/kind/test-pod-policies.sh
 
 ## help: Show this help message
 help:
