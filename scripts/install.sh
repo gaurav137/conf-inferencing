@@ -24,11 +24,11 @@
 #
 # JSON Config Example:
 #   {
-#     "signing_cert_url": "https://signing-server.example.com/signingcert",
+#     "signingCertUrl": "https://signing-server.example.com/signingcert",
 #     "version": "v1.0.0",
-#     "github_repo": "gaurav137/conf-inferencing",
-#     "proxy_listen_addr": "127.0.0.1:6444",
-#     "skip_kubelet_restart": false
+#     "githubRepo": "gaurav137/conf-inferencing",
+#     "proxyListenAddr": "127.0.0.1:6444",
+#     "skipKubeletRestart": false
 #   }
 #
 # Requirements:
@@ -139,12 +139,12 @@ load_config() {
     local val
 
     if [[ -z "$SIGNING_CERT_URL" ]]; then
-        val=$(jq -r '.signing_cert_url // empty' "$CONFIG_FILE")
+        val=$(jq -r '.signingCertUrl // empty' "$CONFIG_FILE")
         [[ -n "$val" ]] && SIGNING_CERT_URL="$val"
     fi
 
     if [[ -z "$SIGNING_CERT_FILE" ]]; then
-        val=$(jq -r '.signing_cert_file // empty' "$CONFIG_FILE")
+        val=$(jq -r '.signingCertFile // empty' "$CONFIG_FILE")
         [[ -n "$val" ]] && SIGNING_CERT_FILE="$val"
     fi
 
@@ -154,17 +154,17 @@ load_config() {
     fi
 
     if [[ "$GITHUB_REPO" == "gaurav137/conf-inferencing" ]]; then
-        val=$(jq -r '.github_repo // empty' "$CONFIG_FILE")
+        val=$(jq -r '.githubRepo // empty' "$CONFIG_FILE")
         [[ -n "$val" ]] && GITHUB_REPO="$val"
     fi
 
     if [[ "$PROXY_LISTEN_ADDR" == "127.0.0.1:6444" ]]; then
-        val=$(jq -r '.proxy_listen_addr // empty' "$CONFIG_FILE")
+        val=$(jq -r '.proxyListenAddr // empty' "$CONFIG_FILE")
         [[ -n "$val" ]] && PROXY_LISTEN_ADDR="$val"
     fi
 
     if [[ "$SKIP_KUBELET_RESTART" == "false" ]]; then
-        val=$(jq -r '.skip_kubelet_restart // empty' "$CONFIG_FILE")
+        val=$(jq -r '.skipKubeletRestart // empty' "$CONFIG_FILE")
         [[ "$val" == "true" ]] && SKIP_KUBELET_RESTART=true
     fi
 
