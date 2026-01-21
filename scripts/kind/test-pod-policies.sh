@@ -19,9 +19,10 @@ WORKER_NODE_NAME="${CLUSTER_NAME}-worker"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 SIGN_POD_SCRIPT="$PROJECT_ROOT/scripts/sign-pod.sh"
-TEST_PODS_DIR="$PROJECT_ROOT/tmp/test-pods"
+TEST_POLICIES_DIR="$SCRIPT_DIR/test-pod-policies"
 SIGNING_SERVER_CONTAINER="signing-server"
 SIGNING_SERVER_PORT="${SIGNING_SERVER_PORT:-8080}"
+SIGNING_SERVER_URL="${SIGNING_SERVER_URL:-http://localhost:$SIGNING_SERVER_PORT}"
 
 # Test result tracking
 TEST1_RESULT=""
@@ -95,30 +96,43 @@ check_proxy_status() {
     echo ""
 }
 
-create_test_pod_yaml() {
-    local name="$1"
-    local namespace="$2"
+# Load and compact a policy JSON file (sorted keys, no whitespace)
+load_policy_json() {
+    local policy_file="$1"
+    python3 -c "
+import json
+import sys
+
+with open('$policy_file', 'r') as f:
+    policy = json.load(f)
+
+def sort_dict(obj):
+    if isinstance(obj, dict):
+        return {k: sort_dict(v) for k, v in sorted(obj.items())}
+    elif isinstance(obj, list):
+        return [sort_dict(item) for item in obj]
+    return obj
+
+sorted_policy = sort_dict(policy)
+print(json.dumps(sorted_policy, separators=(',', ':')))
+"
+}
+
+# Sign a policy JSON and return the signature
+sign_policy() {
+    local policy_base64="$1"
     
-    cat <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: $name
-  namespace: $namespace
-spec:
-  nodeSelector:
-    node-type: signed-workloads
-  tolerations:
-  - key: "signed-workloads"
-    operator: "Equal"
-    value: "required"
-    effect: "NoSchedule"
-  containers:
-  - name: test
-    image: nginx:latest
-    ports:
-    - containerPort: 80
-EOF
+    local response
+    response=$(curl -sf -X POST "$SIGNING_SERVER_URL/sign" \
+        -H "Content-Type: application/json" \
+        -d "{\"payload\": $(printf '%s' "$policy_base64" | jq -Rs .)}")
+    
+    if [[ $? -ne 0 ]]; then
+        echo ""
+        return 1
+    fi
+    
+    echo "$response" | jq -r '.signature'
 }
 
 cleanup_test_resources() {
@@ -134,19 +148,59 @@ test_signed_pod() {
     log_test "TEST 1: Creating a SIGNED pod (should be ALLOWED)..."
     echo ""
     
-    mkdir -p "$TEST_PODS_DIR"
+    # Load the nginx policy from the checked-in file
+    local policy_file="$TEST_POLICIES_DIR/nginx-pod-policy.json"
+    if [[ ! -f "$policy_file" ]]; then
+        log_error "Policy file not found: $policy_file"
+        TEST1_RESULT="FAILED"
+        return
+    fi
     
-    # Create unsigned pod YAML
-    create_test_pod_yaml "test-signed" "default" > "$TEST_PODS_DIR/test-signed-unsigned.yaml"
+    log_info "Loading policy from $policy_file"
+    local policy_json
+    policy_json=$(load_policy_json "$policy_file")
     
-    # Sign the pod using sign-pod.sh (which uses signing-server)
-    log_info "Signing pod spec using signing-server..."
-    "$SIGN_POD_SCRIPT" sign-spec "$TEST_PODS_DIR/test-signed-unsigned.yaml" > "$TEST_PODS_DIR/test-signed.yaml" 2>/dev/null
+    # Base64 encode the policy
+    local policy_base64
+    policy_base64=$(printf '%s' "$policy_json" | base64 -w 0)
     
-    log_info "Created signed pod with signature annotation"
+    log_info "Policy: $policy_json"
     
-    # Apply the signed pod
-    kubectl apply -f "$TEST_PODS_DIR/test-signed.yaml"
+    # Sign the policy
+    log_info "Signing policy using signing-server..."
+    local signature
+    signature=$(sign_policy "$policy_base64")
+    
+    if [[ -z "$signature" || "$signature" == "null" ]]; then
+        log_error "Failed to sign policy"
+        TEST1_RESULT="FAILED"
+        return
+    fi
+    
+    # Create the signed pod YAML
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-signed
+  namespace: default
+  annotations:
+    kubelet-proxy.io/policy: "$policy_base64"
+    kubelet-proxy.io/signature: "$signature"
+spec:
+  nodeSelector:
+    node-type: signed-workloads
+  tolerations:
+  - key: "signed-workloads"
+    operator: "Equal"
+    value: "required"
+    effect: "NoSchedule"
+  containers:
+  - name: test
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+EOF
     
     log_info "Waiting for pod to be scheduled..."
     sleep 10
@@ -173,13 +227,27 @@ test_unsigned_pod() {
     log_test "TEST 2: Creating an UNSIGNED pod (should be REJECTED)..."
     echo ""
     
-    mkdir -p "$TEST_PODS_DIR"
-    
-    # Create unsigned pod yaml
-    create_test_pod_yaml "test-unsigned" "default" > "$TEST_PODS_DIR/test-unsigned.yaml"
-    
-    # Apply the unsigned pod
-    kubectl apply -f "$TEST_PODS_DIR/test-unsigned.yaml"
+    # Create unsigned pod yaml directly
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-unsigned
+  namespace: default
+spec:
+  nodeSelector:
+    node-type: signed-workloads
+  tolerations:
+  - key: "signed-workloads"
+    operator: "Equal"
+    value: "required"
+    effect: "NoSchedule"
+  containers:
+  - name: test
+    image: nginx:latest
+    ports:
+    - containerPort: 80
+EOF
     
     log_info "Waiting for admission decision..."
     sleep 5
@@ -214,17 +282,23 @@ test_bad_signature_pod() {
     log_test "TEST 3: Creating a pod with INVALID signature (should be REJECTED)..."
     echo ""
     
-    mkdir -p "$TEST_PODS_DIR"
+    # Load the nginx policy from the checked-in file
+    local policy_file="$TEST_POLICIES_DIR/nginx-pod-policy.json"
+    local policy_json
+    policy_json=$(load_policy_json "$policy_file")
+    local policy_base64
+    policy_base64=$(printf '%s' "$policy_json" | base64 -w 0)
     
-    # Create pod with bad signature
-    cat > "$TEST_PODS_DIR/test-bad-sig.yaml" <<EOF
+    # Create pod with valid policy but garbage signature
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
   name: test-bad-sig
   namespace: default
   annotations:
-    kubelet-proxy.io/signature: "aW52YWxpZHNpZ25hdHVyZQ=="
+    kubelet-proxy.io/policy: "$policy_base64"
+    kubelet-proxy.io/signature: "aW52YWxpZHNpZ25hdHVyZWRhdGE="
 spec:
   nodeSelector:
     node-type: signed-workloads
@@ -239,9 +313,6 @@ spec:
     ports:
     - containerPort: 80
 EOF
-    
-    # Apply the pod with bad signature
-    kubectl apply -f "$TEST_PODS_DIR/test-bad-sig.yaml"
     
     log_info "Waiting for admission decision..."
     sleep 5
@@ -275,33 +346,42 @@ test_image_mismatch_pod() {
     log_test "TEST 4: Creating a pod with MISMATCHED IMAGE (policy says nginx, pod uses busybox)..."
     echo ""
     
-    mkdir -p "$TEST_PODS_DIR"
+    # Load the nginx policy from the checked-in file (this policy allows nginx:latest)
+    local policy_file="$TEST_POLICIES_DIR/nginx-pod-policy.json"
+    if [[ ! -f "$policy_file" ]]; then
+        log_error "Policy file not found: $policy_file"
+        TEST4_RESULT="FAILED"
+        return
+    fi
     
-    # Create a pod with nginx image and sign it
-    create_test_pod_yaml "test-image-mismatch" "default" > "$TEST_PODS_DIR/test-image-mismatch-original.yaml"
+    local policy_json
+    policy_json=$(load_policy_json "$policy_file")
+    local policy_base64
+    policy_base64=$(printf '%s' "$policy_json" | base64 -w 0)
     
-    # Sign the pod (policy will include nginx:latest as allowed image)
-    log_info "Signing pod with nginx:latest image..."
-    "$SIGN_POD_SCRIPT" sign-spec "$TEST_PODS_DIR/test-image-mismatch-original.yaml" > "$TEST_PODS_DIR/test-image-mismatch-signed.yaml" 2>/dev/null
+    # Sign the nginx policy
+    log_info "Signing nginx policy..."
+    local signature
+    signature=$(sign_policy "$policy_base64")
     
-    # Extract the policy and signature annotations from the signed pod
-    local policy_annotation
-    local signature_annotation
-    policy_annotation=$(grep 'kubelet-proxy.io/policy:' "$TEST_PODS_DIR/test-image-mismatch-signed.yaml" | sed 's/.*kubelet-proxy.io\/policy: //')
-    signature_annotation=$(grep 'kubelet-proxy.io/signature:' "$TEST_PODS_DIR/test-image-mismatch-signed.yaml" | sed 's/.*kubelet-proxy.io\/signature: //')
+    if [[ -z "$signature" || "$signature" == "null" ]]; then
+        log_error "Failed to sign policy"
+        TEST4_RESULT="FAILED"
+        return
+    fi
     
-    log_info "Creating pod with busybox:latest but keeping nginx policy signature..."
+    log_info "Creating pod with busybox:latest but using nginx policy signature..."
     
-    # Create a new pod with busybox image but using the nginx policy signature
-    cat > "$TEST_PODS_DIR/test-image-mismatch.yaml" <<EOF
+    # Create a pod with busybox image but using the nginx policy signature
+    cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
   name: test-image-mismatch
   namespace: default
   annotations:
-    kubelet-proxy.io/policy: $policy_annotation
-    kubelet-proxy.io/signature: $signature_annotation
+    kubelet-proxy.io/policy: "$policy_base64"
+    kubelet-proxy.io/signature: "$signature"
 spec:
   nodeSelector:
     node-type: signed-workloads
@@ -315,9 +395,6 @@ spec:
     image: busybox:latest
     command: ["sleep", "3600"]
 EOF
-    
-    # Apply the pod with mismatched image
-    kubectl apply -f "$TEST_PODS_DIR/test-image-mismatch.yaml"
     
     log_info "Waiting for admission decision..."
     sleep 5

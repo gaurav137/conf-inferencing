@@ -1,0 +1,10 @@
+{
+  "containers": {
+    "test": {
+      "image": "busybox:latest"
+    }
+  },
+  "nodeSelector": {
+    "node-type": "signed-workloads"
+  }
+}

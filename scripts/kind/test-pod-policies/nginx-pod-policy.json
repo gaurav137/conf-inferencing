@@ -1,0 +1,10 @@
+{
+  "containers": {
+    "test": {
+      "image": "nginx:latest"
+    }
+  },
+  "nodeSelector": {
+    "node-type": "signed-workloads"
+  }
+}
