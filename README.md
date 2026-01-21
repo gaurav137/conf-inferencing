@@ -169,20 +169,32 @@ The sign-pod.sh script connects to the signing-server at `SIGNING_SERVER_URL` (d
 
 Instead of signing the full pod spec (which changes when Kubernetes adds defaults), kubelet-proxy uses a **policy-based approach**. The `sign-pod.sh` script extracts security-relevant fields from the pod spec into a deterministic policy JSON, which is then signed and verified.
 
-##### Policy Fields
+The policy uses a **per-container structure** where each container is identified by name, allowing precise verification that each container in the pod matches its signed policy.
+
+##### Top-Level Policy Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowedImages` | `string[]` | List of container images from `containers` and `initContainers` |
+| `containers` | `object` | Map of container name to container policy |
+| `initContainers` | `object` | Map of init container name to container policy |
 | `allowHostNetwork` | `boolean` | Present and `true` if pod spec has `hostNetwork: true` |
 | `allowHostPID` | `boolean` | Present and `true` if pod spec has `hostPID: true` |
 | `allowHostIPC` | `boolean` | Present and `true` if pod spec has `hostIPC: true` |
-| `allowPrivileged` | `boolean` | Present and `true` if any container has `securityContext.privileged: true` |
-| `allowedCapabilities` | `string[]` | Sorted list of Linux capabilities from `securityContext.capabilities.add` across all containers |
-| `allowedNodeSelectors` | `object` | Key-value pairs from pod spec `nodeSelector` |
+| `nodeSelector` | `object` | Key-value pairs from pod spec `nodeSelector` |
+
+##### Container Policy Fields
+
+Each entry in `containers` or `initContainers` is keyed by container name and contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | `string` | The container image (supports wildcards in verification) |
+| `privileged` | `boolean` | Present and `true` if `securityContext.privileged: true` |
+| `capabilities` | `string[]` | Sorted list of Linux capabilities from `securityContext.capabilities.add` |
 
 ##### Policy Generation Rules
 
+- **Per-container tracking**: Each container is tracked by name, ensuring the pod spec containers match exactly
 - **Omitted fields**: Fields are only included in the policy if they have non-empty or non-false values
 - **Deterministic serialization**: The policy is serialized as compact JSON with sorted keys (no whitespace) to ensure consistent signatures
 - **Base64 encoding**: The policy JSON is base64-encoded before signing and stored in the annotation
@@ -192,6 +204,9 @@ Instead of signing the full pod spec (which changes when Kubernetes adds default
 For a pod with:
 ```yaml
 spec:
+  initContainers:
+    - name: init
+      image: busybox:latest
   containers:
     - name: app
       image: nginx:latest
@@ -199,6 +214,8 @@ spec:
         privileged: true
         capabilities:
           add: ["NET_ADMIN", "SYS_TIME"]
+    - name: sidecar
+      image: envoyproxy/envoy:v1.28
   hostNetwork: true
   nodeSelector:
     kubernetes.io/os: linux
@@ -208,12 +225,35 @@ The generated policy would be:
 ```json
 {
   "allowHostNetwork": true,
-  "allowPrivileged": true,
-  "allowedCapabilities": ["NET_ADMIN", "SYS_TIME"],
-  "allowedImages": ["nginx:latest"],
-  "allowedNodeSelectors": {"kubernetes.io/os": "linux"}
+  "containers": {
+    "app": {
+      "capabilities": ["NET_ADMIN", "SYS_TIME"],
+      "image": "nginx:latest",
+      "privileged": true
+    },
+    "sidecar": {
+      "image": "envoyproxy/envoy:v1.28"
+    }
+  },
+  "initContainers": {
+    "init": {
+      "image": "busybox:latest"
+    }
+  },
+  "nodeSelector": {
+    "kubernetes.io/os": "linux"
+  }
 }
 ```
+
+##### Verification Behavior
+
+During admission, kubelet-proxy verifies:
+1. **Container name matching**: Every container in the pod must have a corresponding entry in the policy (by name)
+2. **Image matching**: Each container's image must match its policy entry (wildcards supported)
+3. **Security context matching**: `privileged` and `capabilities` must match exactly per container
+4. **Host namespace matching**: `hostNetwork`, `hostPID`, `hostIPC` must match the policy
+5. **Node selector matching**: Node selectors must match exactly
 
 ##### Viewing a Policy
 

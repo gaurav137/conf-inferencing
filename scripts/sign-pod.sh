@@ -64,7 +64,7 @@ get_cert() {
 }
 
 # Generate a policy JSON from a pod spec
-# The policy captures what the pod is allowed to do
+# The policy captures what the pod is allowed to do, organized by container name
 generate_policy() {
     local pod_file="$1"
     
@@ -81,16 +81,46 @@ spec = pod.get('spec', {})
 # Build the policy from the pod spec
 policy = {}
 
-# Extract allowed images from containers
-images = []
+# Helper function to extract container policy
+def extract_container_policy(container):
+    container_policy = {}
+    
+    # Image is required
+    if 'image' in container:
+        container_policy['image'] = container['image']
+    
+    # Extract security context settings
+    sec_ctx = container.get('securityContext', {})
+    
+    # Privileged flag
+    if sec_ctx.get('privileged'):
+        container_policy['privileged'] = True
+    
+    # Capabilities
+    caps = sec_ctx.get('capabilities', {})
+    add_caps = caps.get('add', [])
+    if add_caps:
+        container_policy['capabilities'] = sorted(add_caps)
+    
+    return container_policy
+
+# Extract containers by name
+containers = {}
 for container in spec.get('containers', []):
-    if 'image' in container:
-        images.append(container['image'])
+    name = container.get('name', '')
+    if name:
+        containers[name] = extract_container_policy(container)
+if containers:
+    policy['containers'] = containers
+
+# Extract init containers by name
+init_containers = {}
 for container in spec.get('initContainers', []):
-    if 'image' in container:
-        images.append(container['image'])
-if images:
-    policy['allowedImages'] = images
+    name = container.get('name', '')
+    if name:
+        init_containers[name] = extract_container_policy(container)
+if init_containers:
+    policy['initContainers'] = init_containers
 
 # Extract host namespace settings
 if spec.get('hostNetwork'):
@@ -100,26 +130,10 @@ if spec.get('hostPID'):
 if spec.get('hostIPC'):
     policy['allowHostIPC'] = True
 
-# Extract security context settings (privileged, capabilities)
-privileged = False
-capabilities = set()
-for container in spec.get('containers', []) + spec.get('initContainers', []):
-    sec_ctx = container.get('securityContext', {})
-    if sec_ctx.get('privileged'):
-        privileged = True
-    caps = sec_ctx.get('capabilities', {})
-    for cap in caps.get('add', []):
-        capabilities.add(cap)
-
-if privileged:
-    policy['allowPrivileged'] = True
-if capabilities:
-    policy['allowedCapabilities'] = sorted(list(capabilities))
-
 # Extract node selectors
 node_selector = spec.get('nodeSelector', {})
 if node_selector:
-    policy['allowedNodeSelectors'] = node_selector
+    policy['nodeSelector'] = node_selector
 
 # Output the policy as compact JSON with sorted keys
 def sort_dict(obj):

@@ -24,14 +24,26 @@ const (
 	SignatureAnnotation = "kubelet-proxy.io/signature"
 )
 
+// ContainerPolicy defines the policy for a single container
+type ContainerPolicy struct {
+	// Image is the allowed container image (supports wildcards)
+	Image string `json:"image,omitempty"`
+
+	// Privileged indicates whether the container can run as privileged
+	Privileged bool `json:"privileged,omitempty"`
+
+	// Capabilities lists allowed Linux capabilities to add
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
 // Policy defines what a pod is allowed to do
 // This is extracted from the pod spec at signing time and verified at admission time
 type Policy struct {
-	// AllowedImages is a list of allowed container image patterns (supports wildcards)
-	AllowedImages []string `json:"allowedImages,omitempty"`
+	// Containers maps container name to its policy
+	Containers map[string]ContainerPolicy `json:"containers,omitempty"`
 
-	// AllowedServiceAccounts is a list of allowed service account names
-	AllowedServiceAccounts []string `json:"allowedServiceAccounts,omitempty"`
+	// InitContainers maps init container name to its policy
+	InitContainers map[string]ContainerPolicy `json:"initContainers,omitempty"`
 
 	// AllowHostNetwork indicates whether hostNetwork is allowed
 	AllowHostNetwork bool `json:"allowHostNetwork,omitempty"`
@@ -42,17 +54,8 @@ type Policy struct {
 	// AllowHostIPC indicates whether hostIPC is allowed
 	AllowHostIPC bool `json:"allowHostIPC,omitempty"`
 
-	// AllowPrivileged indicates whether privileged containers are allowed
-	AllowPrivileged bool `json:"allowPrivileged,omitempty"`
-
-	// AllowedCapabilities lists allowed Linux capabilities
-	AllowedCapabilities []string `json:"allowedCapabilities,omitempty"`
-
-	// AllowedVolumeMounts lists allowed volume mount paths (supports wildcards)
-	AllowedVolumeMounts []string `json:"allowedVolumeMounts,omitempty"`
-
-	// AllowedNodeSelectors lists allowed node selector key-value pairs
-	AllowedNodeSelectors map[string]string `json:"allowedNodeSelectors,omitempty"`
+	// NodeSelector lists allowed node selector key-value pairs
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // SignatureVerificationController verifies pod policy signatures
@@ -162,8 +165,13 @@ func (c *SignatureVerificationController) checkPodAgainstPolicy(pod map[string]i
 		return fmt.Errorf("pod has no spec")
 	}
 
-	// Check container images
-	if err := c.checkContainerImages(spec, policy.AllowedImages); err != nil {
+	// Check containers against policy
+	if err := c.checkContainers(spec, "containers", policy.Containers); err != nil {
+		return err
+	}
+
+	// Check init containers against policy
+	if err := c.checkContainers(spec, "initContainers", policy.InitContainers); err != nil {
 		return err
 	}
 
@@ -172,60 +180,73 @@ func (c *SignatureVerificationController) checkPodAgainstPolicy(pod map[string]i
 		return err
 	}
 
-	// Check privileged containers and capabilities
-	if err := c.checkSecurityContext(spec, policy); err != nil {
-		return err
-	}
-
 	// Check node selectors
-	if err := c.checkNodeSelectors(spec, policy.AllowedNodeSelectors); err != nil {
+	if err := c.checkNodeSelectors(spec, policy.NodeSelector); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// checkContainerImages verifies all container images match the allowed patterns
-func (c *SignatureVerificationController) checkContainerImages(spec map[string]interface{}, allowedImages []string) error {
-	if len(allowedImages) == 0 {
-		return nil // No image restrictions
+// checkContainers verifies all containers match their policies by name
+func (c *SignatureVerificationController) checkContainers(spec map[string]interface{}, containerType string, containerPolicies map[string]ContainerPolicy) error {
+	containers, ok := spec[containerType].([]interface{})
+	if !ok {
+		// No containers of this type in spec
+		if len(containerPolicies) > 0 {
+			return fmt.Errorf("policy specifies %s but pod has none", containerType)
+		}
+		return nil
 	}
 
-	// Check containers
-	if containers, ok := spec["containers"].([]interface{}); ok {
-		for _, container := range containers {
-			if containerMap, ok := container.(map[string]interface{}); ok {
-				image, _ := containerMap["image"].(string)
-				if !c.imageMatchesPatterns(image, allowedImages) {
-					return fmt.Errorf("container image '%s' not allowed by policy", image)
-				}
-			}
-		}
+	// Build a set of container names from the policy
+	policyNames := make(map[string]bool)
+	for name := range containerPolicies {
+		policyNames[name] = true
 	}
 
-	// Check initContainers
-	if initContainers, ok := spec["initContainers"].([]interface{}); ok {
-		for _, container := range initContainers {
-			if containerMap, ok := container.(map[string]interface{}); ok {
-				image, _ := containerMap["image"].(string)
-				if !c.imageMatchesPatterns(image, allowedImages) {
-					return fmt.Errorf("init container image '%s' not allowed by policy", image)
-				}
-			}
+	// Check each container in the spec against its policy
+	for _, container := range containers {
+		containerMap, ok := container.(map[string]interface{})
+		if !ok {
+			continue
 		}
+
+		name, _ := containerMap["name"].(string)
+		if name == "" {
+			return fmt.Errorf("%s has container without name", containerType)
+		}
+
+		containerPolicy, exists := containerPolicies[name]
+		if !exists {
+			return fmt.Errorf("%s '%s' not found in policy", containerType, name)
+		}
+
+		// Check image
+		image, _ := containerMap["image"].(string)
+		if !c.matchWildcard(containerPolicy.Image, image) {
+			return fmt.Errorf("%s '%s': image '%s' does not match policy image '%s'", containerType, name, image, containerPolicy.Image)
+		}
+
+		// Check security context
+		if err := c.checkContainerSecurityContextAgainstPolicy(containerMap, name, containerType, &containerPolicy); err != nil {
+			return err
+		}
+
+		// Mark this container as found
+		delete(policyNames, name)
+	}
+
+	// Check for containers in policy but not in spec
+	if len(policyNames) > 0 {
+		var missing []string
+		for name := range policyNames {
+			missing = append(missing, name)
+		}
+		return fmt.Errorf("policy specifies %s not found in pod: %v", containerType, missing)
 	}
 
 	return nil
-}
-
-// imageMatchesPatterns checks if an image matches any of the allowed patterns
-func (c *SignatureVerificationController) imageMatchesPatterns(image string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if c.matchWildcard(pattern, image) {
-			return true
-		}
-	}
-	return false
 }
 
 // matchWildcard matches a string against a pattern with * wildcards
@@ -261,96 +282,86 @@ func (c *SignatureVerificationController) checkHostNamespaces(spec map[string]in
 	return nil
 }
 
-// checkSecurityContext verifies security context settings match the policy
-func (c *SignatureVerificationController) checkSecurityContext(spec map[string]interface{}, policy *Policy) error {
-	// Check containers
-	if containers, ok := spec["containers"].([]interface{}); ok {
-		for _, container := range containers {
-			if containerMap, ok := container.(map[string]interface{}); ok {
-				if err := c.checkContainerSecurityContext(containerMap, policy); err != nil {
-					name, _ := containerMap["name"].(string)
-					return fmt.Errorf("container '%s': %v", name, err)
-				}
-			}
-		}
-	}
-
-	// Check initContainers
-	if initContainers, ok := spec["initContainers"].([]interface{}); ok {
-		for _, container := range initContainers {
-			if containerMap, ok := container.(map[string]interface{}); ok {
-				if err := c.checkContainerSecurityContext(containerMap, policy); err != nil {
-					name, _ := containerMap["name"].(string)
-					return fmt.Errorf("init container '%s': %v", name, err)
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// checkContainerSecurityContext checks a single container's security context
-func (c *SignatureVerificationController) checkContainerSecurityContext(container map[string]interface{}, policy *Policy) error {
-	securityContext, ok := container["securityContext"].(map[string]interface{})
-	if !ok {
-		return nil // No security context
-	}
+// checkContainerSecurityContextAgainstPolicy checks a container's security context against its policy
+func (c *SignatureVerificationController) checkContainerSecurityContextAgainstPolicy(container map[string]interface{}, name, containerType string, policy *ContainerPolicy) error {
+	securityContext, _ := container["securityContext"].(map[string]interface{})
 
 	// Check privileged
-	privileged, _ := securityContext["privileged"].(bool)
-	if privileged && !policy.AllowPrivileged {
-		return fmt.Errorf("privileged containers not allowed by policy")
+	privileged := false
+	if securityContext != nil {
+		privileged, _ = securityContext["privileged"].(bool)
+	}
+	if privileged != policy.Privileged {
+		return fmt.Errorf("%s '%s': privileged=%v does not match policy privileged=%v", containerType, name, privileged, policy.Privileged)
 	}
 
 	// Check capabilities
-	if capabilities, ok := securityContext["capabilities"].(map[string]interface{}); ok {
-		if add, ok := capabilities["add"].([]interface{}); ok {
-			for _, cap := range add {
-				capStr, _ := cap.(string)
-				if !c.isCapabilityAllowed(capStr, policy.AllowedCapabilities) {
-					return fmt.Errorf("capability '%s' not allowed by policy", capStr)
+	var podCaps []string
+	if securityContext != nil {
+		if capabilities, ok := securityContext["capabilities"].(map[string]interface{}); ok {
+			if add, ok := capabilities["add"].([]interface{}); ok {
+				for _, cap := range add {
+					if capStr, ok := cap.(string); ok {
+						podCaps = append(podCaps, capStr)
+					}
 				}
 			}
 		}
 	}
 
+	// Capabilities must match exactly (same set)
+	if !c.capabilitySetsEqual(podCaps, policy.Capabilities) {
+		return fmt.Errorf("%s '%s': capabilities %v do not match policy capabilities %v", containerType, name, podCaps, policy.Capabilities)
+	}
+
 	return nil
 }
 
-// isCapabilityAllowed checks if a capability is in the allowed list
-func (c *SignatureVerificationController) isCapabilityAllowed(cap string, allowedCaps []string) bool {
-	if len(allowedCaps) == 0 {
-		return true // No restrictions
+// capabilitySetsEqual checks if two capability slices contain the same elements
+func (c *SignatureVerificationController) capabilitySetsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	for _, allowed := range allowedCaps {
-		if strings.EqualFold(allowed, cap) || allowed == "*" {
-			return true
+
+	// Create maps for comparison (case-insensitive)
+	aMap := make(map[string]bool)
+	for _, cap := range a {
+		aMap[strings.ToUpper(cap)] = true
+	}
+
+	for _, cap := range b {
+		if !aMap[strings.ToUpper(cap)] {
+			return false
 		}
 	}
-	return false
+
+	return true
 }
 
-// checkNodeSelectors verifies node selectors match the policy
-func (c *SignatureVerificationController) checkNodeSelectors(spec map[string]interface{}, allowedSelectors map[string]string) error {
-	if len(allowedSelectors) == 0 {
-		return nil // No restrictions
-	}
+// checkNodeSelectors verifies node selectors match the policy exactly
+func (c *SignatureVerificationController) checkNodeSelectors(spec map[string]interface{}, policySelectors map[string]string) error {
+	podSelectors, _ := spec["nodeSelector"].(map[string]interface{})
 
-	nodeSelector, ok := spec["nodeSelector"].(map[string]interface{})
-	if !ok {
-		return nil // No node selector in pod
-	}
-
-	// Check that pod's node selector matches what's allowed
-	for key, value := range nodeSelector {
-		valueStr, _ := value.(string)
-		allowedValue, exists := allowedSelectors[key]
-		if !exists {
-			return fmt.Errorf("node selector key '%s' not allowed by policy", key)
+	// Convert pod selectors to map[string]string
+	podSelectorMap := make(map[string]string)
+	for key, value := range podSelectors {
+		if valueStr, ok := value.(string); ok {
+			podSelectorMap[key] = valueStr
 		}
-		if allowedValue != "*" && allowedValue != valueStr {
-			return fmt.Errorf("node selector '%s=%s' not allowed by policy (allowed: %s)", key, valueStr, allowedValue)
+	}
+
+	// Check that pod and policy have the same node selectors
+	if len(podSelectorMap) != len(policySelectors) {
+		return fmt.Errorf("node selectors count mismatch: pod has %d, policy has %d", len(podSelectorMap), len(policySelectors))
+	}
+
+	for key, policyValue := range policySelectors {
+		podValue, exists := podSelectorMap[key]
+		if !exists {
+			return fmt.Errorf("node selector '%s' in policy but not in pod", key)
+		}
+		if podValue != policyValue {
+			return fmt.Errorf("node selector '%s': pod has '%s', policy has '%s'", key, podValue, policyValue)
 		}
 	}
 
