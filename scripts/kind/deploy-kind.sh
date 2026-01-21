@@ -81,43 +81,6 @@ generate_proxy_certs() {
     log_info "Certificates generated in $cert_dir"
 }
 
-create_admission_policy() {
-    log_info "Creating admission policy..."
-    
-    local policy_dir="$PROJECT_ROOT/tmp"
-    mkdir -p "$policy_dir"
-    
-    cat > "$policy_dir/admission-policy.json" <<'EOF'
-{
-  "name": "kind-test-policy",
-  "defaultAction": "allow",
-  "rules": [
-    {
-      "name": "deny-test-namespace-privileged",
-      "action": "deny",
-      "match": {
-        "namespaces": ["deny-test"],
-        "security": {
-          "denyPrivileged": true
-        }
-      },
-      "message": "Privileged pods are not allowed in deny-test namespace"
-    },
-    {
-      "name": "deny-blocked-namespace",
-      "action": "deny", 
-      "match": {
-        "namespaces": ["blocked-*"]
-      },
-      "message": "Pods in blocked-* namespaces are not allowed on this node"
-    }
-  ]
-}
-EOF
-    
-    log_info "Admission policy created"
-}
-
 create_systemd_service() {
     log_info "Creating systemd service file..."
     
@@ -139,7 +102,6 @@ ExecStart=/usr/local/bin/kubelet-proxy \
     --listen-addr 127.0.0.1:6444 \
     --tls-cert /etc/kubelet-proxy/kubelet-proxy.crt \
     --tls-key /etc/kubelet-proxy/kubelet-proxy.key \
-    --admission-policy /etc/kubelet-proxy/admission-policy.json \
     --log-requests=true \
     --log-pod-payloads=false
 
@@ -228,7 +190,6 @@ chmod +x /usr/local/bin/kubelet-proxy
 
 mv "$STAGING_DIR/kubelet-proxy.crt" /etc/kubelet-proxy/
 mv "$STAGING_DIR/kubelet-proxy.key" /etc/kubelet-proxy/
-mv "$STAGING_DIR/admission-policy.json" /etc/kubelet-proxy/
 
 mv "$STAGING_DIR/kubelet-proxy.service" /etc/systemd/system/
 
@@ -307,7 +268,6 @@ deploy_to_node() {
     docker cp "$PROJECT_ROOT/bin/kubelet-proxy-linux-amd64" "$WORKER_NODE_NAME:$staging_dir/kubelet-proxy"
     docker cp "$cert_dir/kubelet-proxy.crt" "$WORKER_NODE_NAME:$staging_dir/"
     docker cp "$cert_dir/kubelet-proxy.key" "$WORKER_NODE_NAME:$staging_dir/"
-    docker cp "$tmp_dir/admission-policy.json" "$WORKER_NODE_NAME:$staging_dir/"
     docker cp "$tmp_dir/kubelet-proxy.service" "$WORKER_NODE_NAME:$staging_dir/"
     docker cp "$tmp_dir/create-proxy-kubeconfig.sh" "$WORKER_NODE_NAME:$staging_dir/"
     docker cp "$tmp_dir/setup-node.sh" "$WORKER_NODE_NAME:$staging_dir/"
@@ -386,7 +346,6 @@ main() {
     cleanup
     build_binary
     generate_proxy_certs
-    create_admission_policy
     create_systemd_service
     create_kubelet_proxy_kubeconfig
     create_setup_script

@@ -46,14 +46,14 @@ The kubelet-proxy is a binary that runs on a Kubernetes node, intercepting HTTP 
 └─────────────┘      └──────────────┘      └─────────────┘
                             │
                             ▼
-                     Policy Evaluation
+                     Signature Verification
                      (accept/reject pod)
 ```
 
 The kubelet connects to kubelet-proxy (thinking it's the API server). The proxy:
 1. Forwards all requests to the real API server
 2. Intercepts pod watch/list **responses** from the API server
-3. Evaluates each pod against admission policies
+3. Verifies cryptographic signatures on each pod
 4. For rejected pods:
    - Patches the pod status to `Failed` via the API server (Kubernetes-native rejection)
    - Filters the pod from the response so kubelet doesn't attempt to run it
@@ -86,7 +86,7 @@ This approach:
 
 - **Kubernetes-Native Rejection**: Rejects pods by patching status to Failed (same as kubelet)
 - **Response Interception**: Intercepts pod list/watch responses from the API server  
-- **Policy-Based Decisions**: Configure admission rules via JSON policy files
+- **Signature Verification**: Cryptographic verification of pod spec signatures
 - **Kubeconfig Support**: Uses standard kubeconfig file for API server connection
 - **Watch Stream Support**: Properly handles Kubernetes watch streams
 - **Logging**: Detailed logging of all requests and admission decisions
@@ -101,7 +101,7 @@ This approach:
   --listen-addr :6443 \
   --tls-cert /path/to/server.crt \
   --tls-key /path/to/server.key \
-  --admission-policy /path/to/policy.json \
+  --signature-verification-cert /path/to/signing-cert.pem \
   --log-requests
 ```
 
@@ -122,10 +122,9 @@ On the node, configure the kubelet to connect to kubelet-proxy instead of the AP
 | `--listen-addr` | `:6443` | Address to listen on for kubelet connections |
 | `--tls-cert` | | Path to TLS certificate for serving |
 | `--tls-key` | | Path to TLS key for serving |
-| `--admission-policy` | | Path to admission policy JSON file |
+| `--signature-verification-cert` | | Path to certificate for pod spec signature verification |
 | `--log-requests` | `true` | Log all proxied requests |
 | `--log-pod-payloads` | `false` | Log full pod JSON payloads |
-| `--signature-verification-cert` | | Path to certificate for pod spec signature verification |
 
 ### Signature Verification
 
@@ -192,40 +191,6 @@ metadata:
 - **ECDSA** (recommended): P-256, P-384, P-521 curves
 - **RSA**: PKCS#1 v1.5 signatures
 
-### Admission Policies
-
-Create a JSON policy file to define admission rules. See [examples/admission-policy.json](examples/admission-policy.json) for a sample policy.
-
-#### Policy Structure
-
-```json
-{
-  "name": "my-policy",
-  "defaultAction": "allow",
-  "rules": [
-    {
-      "name": "deny-privileged",
-      "action": "deny",
-      "match": {
-        "security": {
-          "denyPrivileged": true
-        }
-      },
-      "message": "Privileged containers are not allowed"
-    }
-  ]
-}
-```
-
-#### Match Criteria
-
-- **namespaces**: List of namespace patterns (supports wildcards)
-- **namespaceRegex**: Regex pattern for namespace matching
-- **labels**: Required pod labels
-- **annotations**: Required pod annotations
-- **images**: Image matching rules (allowed/denied registries, require digest)
-- **security**: Security context rules (privileged, host namespaces, capabilities)
-
 ## Project Structure
 
 ```
@@ -238,7 +203,6 @@ Create a JSON policy file to define admission rules. See [examples/admission-pol
 │       │   ├── admission.go    # Core admission types
 │       │   ├── chain.go        # Chain multiple controllers
 │       │   ├── logging.go      # Logging controller
-│       │   ├── policy.go       # Policy-based controller
 │       │   └── signature.go    # Signature verification controller
 │       ├── config.go           # Configuration
 │       ├── kubeconfig.go       # Kubeconfig parser
@@ -247,12 +211,9 @@ Create a JSON policy file to define admission rules. See [examples/admission-pol
 │   ├── kind/                   # Kind cluster deployment scripts
 │   │   ├── deploy-kind.sh      # Deploy to kind cluster
 │   │   ├── teardown-kind.sh    # Remove kind cluster
-│   │   ├── test-deployment.sh  # Test basic deployment
 │   │   └── test-signature-verification.sh  # Test signature verification
 │   └── sign-pod.sh             # Pod signing helper script
-├── examples/
-│   ├── admission-policy.json   # Sample admission policy
-│   └── strict-admission-policy.json
+├── examples/                   # Example configurations
 ├── pkg/                        # Public library code
 ├── bin/                        # Compiled binaries (generated)
 ├── Makefile
@@ -268,11 +229,8 @@ Deploy kubelet-proxy to a local kind cluster for testing:
 # Deploy to kind cluster (2 nodes: control-plane + worker)
 make deploy-kind
 
-# Run basic admission tests
+# Run signature verification tests
 make test-kind
-
-# Test signature verification
-./scripts/kind/test-signature-verification.sh
 
 # Tear down cluster
 make teardown-kind
@@ -282,4 +240,4 @@ The kind deployment:
 - Creates a 2-node cluster (control-plane + worker)
 - Installs kubelet-proxy on the worker node only
 - Configures kubelet to route through the proxy
-- Sets up a policy that blocks pods in `blocked-*` namespaces
+- Verifies pod signatures when a signing certificate is provided

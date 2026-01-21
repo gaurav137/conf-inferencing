@@ -77,9 +77,8 @@ deploy-kind:
 teardown-kind:
 	@./scripts/kind/teardown-kind.sh
 
-## test-kind: Run tests against the kind cluster deployment
-test-kind:
-	@./scripts/kind/test-deployment.sh
+## test-kind: Run signature verification tests against the kind cluster
+test-kind: test-signature
 
 ## test-signature: Run signature verification tests against the kind cluster
 test-signature:

@@ -19,9 +19,6 @@ type Config struct {
 	LogRequests    bool
 	LogPodPayloads bool
 
-	// AdmissionPolicyFile is the path to the admission policy configuration
-	AdmissionPolicyFile string
-
 	// SignatureVerificationCert is the path to the public key certificate
 	// used to verify pod spec signatures. If set, pods must have a valid
 	// signature in the annotation "kubelet-proxy.io/signature"

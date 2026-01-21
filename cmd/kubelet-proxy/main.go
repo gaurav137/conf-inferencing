@@ -24,7 +24,6 @@ func run() int {
 	flag.StringVar(&cfg.ListenAddr, "listen-addr", ":6443", "Address to listen on for kubelet connections")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "Path to TLS certificate file for serving")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "Path to TLS key file for serving")
-	flag.StringVar(&cfg.AdmissionPolicyFile, "admission-policy", "", "Path to admission policy file (optional)")
 	flag.StringVar(&cfg.SignatureVerificationCert, "signature-verification-cert", "", "Path to public key certificate for verifying pod spec signatures (optional)")
 	flag.BoolVar(&cfg.LogRequests, "log-requests", true, "Log all proxied requests")
 	flag.BoolVar(&cfg.LogPodPayloads, "log-pod-payloads", false, "Log full pod payloads for pod creation requests")
@@ -53,16 +52,6 @@ func run() int {
 			return 1
 		}
 		controllers = append(controllers, sigController)
-	}
-
-	// Add policy controller if configured
-	if cfg.AdmissionPolicyFile != "" {
-		policyController, err := admission.NewPolicyController(cfg.AdmissionPolicyFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading admission policy: %v\n", err)
-			return 1
-		}
-		controllers = append(controllers, policyController)
 	}
 
 	// Build the final admission controller
