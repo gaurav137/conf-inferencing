@@ -18,7 +18,6 @@ CLUSTER_NAME="${CLUSTER_NAME:-kubelet-proxy-test}"
 WORKER_NODE_NAME="${CLUSTER_NAME}-worker"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-SIGN_POD_SCRIPT="$PROJECT_ROOT/scripts/sign-pod.sh"
 TEST_POLICIES_DIR="$SCRIPT_DIR/test-pod-policies"
 SIGNING_SERVER_CONTAINER="signing-server"
 SIGNING_SERVER_PORT="${SIGNING_SERVER_PORT:-8080}"
@@ -40,12 +39,6 @@ check_prerequisites() {
     # Check cluster exists
     if ! kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
         log_error "Cluster '$CLUSTER_NAME' not found. Run 'make deploy-kind' first."
-        exit 1
-    fi
-    
-    # Check signing script exists
-    if [[ ! -x "$SIGN_POD_SCRIPT" ]]; then
-        log_error "Signing script not found or not executable: $SIGN_POD_SCRIPT"
         exit 1
     fi
     
@@ -987,9 +980,6 @@ run_tests() {
         echo -e "  ${RED}$passed passed, $failed failed, $partial partial${NC}"
     fi
     echo "----------------------------------------"
-    echo ""
-    echo "To sign a pod:"
-    echo "  $SIGN_POD_SCRIPT sign-spec <pod.yaml>"
     echo ""
     echo "To watch proxy logs in real-time:"
     echo "  docker exec $WORKER_NODE_NAME journalctl -u kubelet-proxy -f"

@@ -153,21 +153,23 @@ Provide a certificate containing the public key:
 
 #### Signing Pods
 
-Use the signing-server (deployed in the kind cluster) and the sign-pod.sh helper script:
+Pods are signed by generating a policy JSON from the pod spec, base64-encoding it, and signing it via the signing-server:
 
 ```bash
-# Sign a pod spec using the signing-server (outputs signed YAML to stdout)
-./scripts/sign-pod.sh sign-spec my-pod.yaml > my-pod-signed.yaml
+# Sign a payload using the signing-server
+curl -X POST http://localhost:8080/sign \
+  -H "Content-Type: application/json" \
+  -d '{"payload": "<base64-encoded-policy>"}'
 
 # Fetch the signing certificate from signing-server
-./scripts/sign-pod.sh get-cert > signing-cert.pem
+curl http://localhost:8080/signingcert > signing-cert.pem
 ```
 
-The sign-pod.sh script connects to the signing-server at `SIGNING_SERVER_URL` (default: `http://localhost:8080`). When using the kind deployment, the signing-server runs as a local Docker container on port 8080.
+When using the kind deployment, the signing-server runs as a local Docker container on port 8080.
 
 #### Policy Schema
 
-Instead of signing the full pod spec (which changes when Kubernetes adds defaults), kubelet-proxy uses a **policy-based approach**. The `sign-pod.sh` script extracts security-relevant fields from the pod spec into a deterministic policy JSON, which is then signed and verified.
+Instead of signing the full pod spec (which changes when Kubernetes adds defaults), kubelet-proxy uses a **policy-based approach**. Security-relevant fields are extracted from the pod spec into a deterministic policy JSON, which is then signed and verified.
 
 The policy uses a **per-container structure** where each container is identified by name, allowing precise verification that each container in the pod matches its signed policy.
 
@@ -278,12 +280,6 @@ During admission, kubelet-proxy verifies:
 
 ##### Viewing a Policy
 
-Use `show-policy` to see what policy would be generated without signing:
-
-```bash
-./scripts/sign-pod.sh show-policy my-pod.yaml
-```
-
 #### Signature Annotation
 
 The policy and signature are stored in pod annotations:
@@ -368,11 +364,10 @@ curl http://localhost:8080/signingcert > signing-cert.pem
 │       ├── kubeconfig.go       # Kubeconfig parser
 │       └── proxy.go            # HTTP proxy implementation
 ├── scripts/
-│   ├── kind/                   # Kind cluster deployment scripts
-│   │   ├── deploy-kind.sh      # Deploy to kind cluster
-│   │   ├── teardown-kind.sh    # Remove kind cluster
-│   │   └── test-pod-policies.sh  # Test pod policy verification
-│   └── sign-pod.sh             # Pod signing helper script
+│   └── kind/                   # Kind cluster deployment scripts
+│       ├── deploy-kind.sh      # Deploy to kind cluster
+│       ├── teardown-kind.sh    # Remove kind cluster
+│       └── test-pod-policies.sh  # Test pod policy verification
 ├── Dockerfile.signing-server   # Dockerfile for signing-server
 ├── examples/                   # Example configurations
 ├── pkg/                        # Public library code
