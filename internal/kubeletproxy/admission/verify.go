@@ -26,17 +26,23 @@ const (
 
 // ContainerPolicy defines the policy for a single container
 type ContainerPolicy struct {
-	// Image is the allowed container image (supports wildcards)
+	// Name is the container name
+	Name string `json:"name"`
+
+	// Properties contains the container policy properties
+	Properties ContainerProperties `json:"properties"`
+}
+
+// ContainerProperties defines the properties within a container policy
+type ContainerProperties struct {
+	// Image is the allowed container image (must match exactly)
 	Image string `json:"image,omitempty"`
 
 	// Command is the entrypoint array (overrides container ENTRYPOINT)
 	Command []string `json:"command,omitempty"`
 
-	// Args are the arguments to the entrypoint (overrides container CMD)
-	Args []string `json:"args,omitempty"`
-
-	// Env lists environment variables for the container
-	Env []EnvVar `json:"env,omitempty"`
+	// EnvironmentVariables lists environment variables for the container
+	EnvironmentVariables []EnvVar `json:"environmentVariables,omitempty"`
 
 	// VolumeMounts lists volume mounts for the container
 	VolumeMounts []VolumeMount `json:"volumeMounts,omitempty"`
@@ -48,40 +54,24 @@ type ContainerPolicy struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
-// EnvVar represents an environment variable
+// EnvVar represents an environment variable with optional regex matching
 type EnvVar struct {
 	Name  string `json:"name"`
 	Value string `json:"value,omitempty"`
+	Regex bool   `json:"regex,omitempty"`
 }
 
 // VolumeMount represents a volume mount
 type VolumeMount struct {
 	Name      string `json:"name"`
 	MountPath string `json:"mountPath"`
+	MountType string `json:"mountType,omitempty"`
 	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
-// Policy defines what a pod is allowed to do
-// This is extracted from the pod spec at signing time and verified at admission time
-type Policy struct {
-	// Containers maps container name to its policy
-	Containers map[string]ContainerPolicy `json:"containers,omitempty"`
-
-	// InitContainers maps init container name to its policy
-	InitContainers map[string]ContainerPolicy `json:"initContainers,omitempty"`
-
-	// AllowHostNetwork indicates whether hostNetwork is allowed
-	AllowHostNetwork bool `json:"allowHostNetwork,omitempty"`
-
-	// AllowHostPID indicates whether hostPID is allowed
-	AllowHostPID bool `json:"allowHostPID,omitempty"`
-
-	// AllowHostIPC indicates whether hostIPC is allowed
-	AllowHostIPC bool `json:"allowHostIPC,omitempty"`
-
-	// NodeSelector lists allowed node selector key-value pairs
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-}
+// Policy is an array of container policies
+// The policy is signed and verified at admission time
+type Policy []ContainerPolicy
 
 // PolicyVerificationController verifies pod policy signatures
 type PolicyVerificationController struct {
@@ -158,7 +148,7 @@ func (c *PolicyVerificationController) Admit(req *Request) *Decision {
 	c.logger.Printf("Policy signature verified for pod %s/%s", req.Namespace, req.Name)
 
 	// Check if the pod matches the policy
-	if err := c.checkPodAgainstPolicy(req.Pod, &policy); err != nil {
+	if err := c.checkPodAgainstPolicy(req.Pod, policy); err != nil {
 		c.logger.Printf("Pod %s/%s does not match policy: %v", req.Namespace, req.Name, err)
 		return Deny(fmt.Sprintf("pod does not match policy: %v", err))
 	}
@@ -184,29 +174,25 @@ func (c *PolicyVerificationController) getAnnotation(pod map[string]interface{},
 }
 
 // checkPodAgainstPolicy verifies the pod spec matches the signed policy
-func (c *PolicyVerificationController) checkPodAgainstPolicy(pod map[string]interface{}, policy *Policy) error {
+func (c *PolicyVerificationController) checkPodAgainstPolicy(pod map[string]interface{}, policy Policy) error {
 	spec, ok := pod["spec"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("pod has no spec")
 	}
 
+	// Build a map of container policies by name for easy lookup
+	containerPolicies := make(map[string]*ContainerProperties)
+	for i := range policy {
+		containerPolicies[policy[i].Name] = &policy[i].Properties
+	}
+
 	// Check containers against policy
-	if err := c.checkContainers(spec, "containers", policy.Containers); err != nil {
+	if err := c.checkContainers(spec, "containers", containerPolicies); err != nil {
 		return err
 	}
 
-	// Check init containers against policy
-	if err := c.checkContainers(spec, "initContainers", policy.InitContainers); err != nil {
-		return err
-	}
-
-	// Check host namespaces
-	if err := c.checkHostNamespaces(spec, policy); err != nil {
-		return err
-	}
-
-	// Check node selectors
-	if err := c.checkNodeSelectors(spec, policy.NodeSelector); err != nil {
+	// Check init containers against policy (they should also be in the policy array)
+	if err := c.checkContainers(spec, "initContainers", containerPolicies); err != nil {
 		return err
 	}
 
@@ -214,20 +200,11 @@ func (c *PolicyVerificationController) checkPodAgainstPolicy(pod map[string]inte
 }
 
 // checkContainers verifies all containers match their policies by name
-func (c *PolicyVerificationController) checkContainers(spec map[string]interface{}, containerType string, containerPolicies map[string]ContainerPolicy) error {
+func (c *PolicyVerificationController) checkContainers(spec map[string]interface{}, containerType string, containerPolicies map[string]*ContainerProperties) error {
 	containers, ok := spec[containerType].([]interface{})
 	if !ok {
-		// No containers of this type in spec
-		if len(containerPolicies) > 0 {
-			return fmt.Errorf("policy specifies %s but pod has none", containerType)
-		}
+		// No containers of this type in spec - that's OK
 		return nil
-	}
-
-	// Build a set of container names from the policy
-	policyNames := make(map[string]bool)
-	for name := range containerPolicies {
-		policyNames[name] = true
 	}
 
 	// Check each container in the spec against its policy
@@ -242,93 +219,162 @@ func (c *PolicyVerificationController) checkContainers(spec map[string]interface
 			return fmt.Errorf("%s has container without name", containerType)
 		}
 
-		containerPolicy, exists := containerPolicies[name]
+		policy, exists := containerPolicies[name]
 		if !exists {
 			return fmt.Errorf("%s '%s' not found in policy", containerType, name)
 		}
 
-		// Check image
+		// Check image (exact match required)
 		image, _ := containerMap["image"].(string)
-		if !c.matchWildcard(containerPolicy.Image, image) {
-			return fmt.Errorf("%s '%s': image '%s' does not match policy image '%s'", containerType, name, image, containerPolicy.Image)
+		if image != policy.Image {
+			return fmt.Errorf("%s '%s': image '%s' does not match policy image '%s'", containerType, name, image, policy.Image)
 		}
 
-		// Check security context
-		if err := c.checkContainerSecurityContextAgainstPolicy(containerMap, name, containerType, &containerPolicy); err != nil {
+		// Check command
+		if err := c.checkCommand(containerMap, name, containerType, policy); err != nil {
 			return err
 		}
 
-		// Mark this container as found
-		delete(policyNames, name)
-	}
-
-	// Check for containers in policy but not in spec
-	if len(policyNames) > 0 {
-		var missing []string
-		for name := range policyNames {
-			missing = append(missing, name)
+		// Check environment variables
+		if err := c.checkEnvVars(containerMap, name, containerType, policy); err != nil {
+			return err
 		}
-		return fmt.Errorf("policy specifies %s not found in pod: %v", containerType, missing)
+
+		// Check volume mounts
+		if err := c.checkVolumeMounts(containerMap, name, containerType, policy); err != nil {
+			return err
+		}
+
+		// Check security context
+		if err := c.checkSecurityContext(containerMap, name, containerType, policy); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-// matchWildcard matches a string against a pattern with * wildcards
-func (c *PolicyVerificationController) matchWildcard(pattern, str string) bool {
-	// Convert wildcard pattern to regex
-	regexPattern := "^" + regexp.QuoteMeta(pattern) + "$"
-	regexPattern = strings.ReplaceAll(regexPattern, `\*`, ".*")
-
-	matched, err := regexp.MatchString(regexPattern, str)
-	if err != nil {
-		return false
+// checkCommand verifies the container's command matches the policy
+func (c *PolicyVerificationController) checkCommand(container map[string]interface{}, name, containerType string, policy *ContainerProperties) error {
+	var podCommand []string
+	if cmd, ok := container["command"].([]interface{}); ok {
+		for _, c := range cmd {
+			if s, ok := c.(string); ok {
+				podCommand = append(podCommand, s)
+			}
+		}
 	}
-	return matched
+
+	// If policy command is nil or empty, any command is allowed
+	if len(policy.Command) == 0 {
+		return nil
+	}
+
+	if !c.stringSlicesEqual(podCommand, policy.Command) {
+		return fmt.Errorf("%s '%s': command %v does not match policy command %v", containerType, name, podCommand, policy.Command)
+	}
+	return nil
 }
 
-// checkHostNamespaces verifies host namespace settings match the policy
-func (c *PolicyVerificationController) checkHostNamespaces(spec map[string]interface{}, policy *Policy) error {
-	hostNetwork, _ := spec["hostNetwork"].(bool)
-	if hostNetwork && !policy.AllowHostNetwork {
-		return fmt.Errorf("hostNetwork not allowed by policy")
+// checkEnvVars verifies the container's environment variables match the policy
+func (c *PolicyVerificationController) checkEnvVars(container map[string]interface{}, name, containerType string, policy *ContainerProperties) error {
+	// Build map of pod env vars (only direct values, not valueFrom)
+	podEnvMap := make(map[string]string)
+	if env, ok := container["env"].([]interface{}); ok {
+		for _, e := range env {
+			if envMap, ok := e.(map[string]interface{}); ok {
+				envName, _ := envMap["name"].(string)
+				envValue, _ := envMap["value"].(string)
+				// Only include env vars with direct values (not valueFrom)
+				if envName != "" && envMap["valueFrom"] == nil {
+					podEnvMap[envName] = envValue
+				}
+			}
+		}
 	}
 
-	hostPID, _ := spec["hostPID"].(bool)
-	if hostPID && !policy.AllowHostPID {
-		return fmt.Errorf("hostPID not allowed by policy")
+	// If policy has no env vars specified, any env is allowed
+	if len(policy.EnvironmentVariables) == 0 {
+		return nil
 	}
 
-	hostIPC, _ := spec["hostIPC"].(bool)
-	if hostIPC && !policy.AllowHostIPC {
-		return fmt.Errorf("hostIPC not allowed by policy")
+	// Check each policy env var against the pod
+	for _, policyEnv := range policy.EnvironmentVariables {
+		podValue, exists := podEnvMap[policyEnv.Name]
+		if !exists {
+			return fmt.Errorf("%s '%s': env var '%s' required by policy but not found in pod", containerType, name, policyEnv.Name)
+		}
+
+		// Check value - supports regex matching if enabled
+		if policyEnv.Regex {
+			matched, err := regexp.MatchString("^"+policyEnv.Value+"$", podValue)
+			if err != nil || !matched {
+				return fmt.Errorf("%s '%s': env var '%s' value '%s' does not match policy regex '%s'", containerType, name, policyEnv.Name, podValue, policyEnv.Value)
+			}
+		} else {
+			// Exact match required
+			if podValue != policyEnv.Value {
+				return fmt.Errorf("%s '%s': env var '%s' value '%s' does not match policy value '%s'", containerType, name, policyEnv.Name, podValue, policyEnv.Value)
+			}
+		}
 	}
 
 	return nil
 }
 
-// checkContainerSecurityContextAgainstPolicy checks a container's security context against its policy
-func (c *PolicyVerificationController) checkContainerSecurityContextAgainstPolicy(container map[string]interface{}, name, containerType string, policy *ContainerPolicy) error {
-	// Check command
-	if err := c.checkCommand(container, name, containerType, policy); err != nil {
-		return err
+// checkVolumeMounts verifies the container's volume mounts match the policy
+func (c *PolicyVerificationController) checkVolumeMounts(container map[string]interface{}, name, containerType string, policy *ContainerProperties) error {
+	// Build map of pod volume mounts
+	podMountsMap := make(map[string]VolumeMount)
+	if mounts, ok := container["volumeMounts"].([]interface{}); ok {
+		for _, m := range mounts {
+			if mountMap, ok := m.(map[string]interface{}); ok {
+				mount := VolumeMount{}
+				if n, ok := mountMap["name"].(string); ok {
+					mount.Name = n
+				}
+				if p, ok := mountMap["mountPath"].(string); ok {
+					mount.MountPath = p
+				}
+				if r, ok := mountMap["readOnly"].(bool); ok {
+					mount.ReadOnly = r
+				}
+				// Skip Kubernetes auto-injected service account token mounts
+				if strings.HasPrefix(mount.Name, "kube-api-access-") ||
+					mount.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
+					continue
+				}
+				podMountsMap[mount.Name] = mount
+			}
+		}
 	}
 
-	// Check args
-	if err := c.checkArgs(container, name, containerType, policy); err != nil {
-		return err
+	// If policy has no volume mounts specified, any mounts are allowed
+	if len(policy.VolumeMounts) == 0 {
+		return nil
 	}
 
-	// Check environment variables
-	if err := c.checkEnvVars(container, name, containerType, policy); err != nil {
-		return err
+	// Check each policy volume mount against the pod
+	for _, policyMount := range policy.VolumeMounts {
+		podMount, exists := podMountsMap[policyMount.Name]
+		if !exists {
+			return fmt.Errorf("%s '%s': volume mount '%s' required by policy but not found in pod", containerType, name, policyMount.Name)
+		}
+
+		if podMount.MountPath != policyMount.MountPath {
+			return fmt.Errorf("%s '%s': volume mount '%s' mountPath '%s' does not match policy '%s'", containerType, name, policyMount.Name, podMount.MountPath, policyMount.MountPath)
+		}
+
+		if podMount.ReadOnly != policyMount.ReadOnly {
+			return fmt.Errorf("%s '%s': volume mount '%s' readOnly=%v does not match policy readOnly=%v", containerType, name, policyMount.Name, podMount.ReadOnly, policyMount.ReadOnly)
+		}
 	}
 
-	// Check volume mounts
-	if err := c.checkVolumeMounts(container, name, containerType, policy); err != nil {
-		return err
-	}
+	return nil
+}
 
+// checkSecurityContext checks a container's security context against its policy
+func (c *PolicyVerificationController) checkSecurityContext(container map[string]interface{}, name, containerType string, policy *ContainerProperties) error {
 	securityContext, _ := container["securityContext"].(map[string]interface{})
 
 	// Check privileged
@@ -362,100 +408,6 @@ func (c *PolicyVerificationController) checkContainerSecurityContextAgainstPolic
 	return nil
 }
 
-// checkCommand verifies the container's command matches the policy
-func (c *PolicyVerificationController) checkCommand(container map[string]interface{}, name, containerType string, policy *ContainerPolicy) error {
-	var podCommand []string
-	if cmd, ok := container["command"].([]interface{}); ok {
-		for _, c := range cmd {
-			if s, ok := c.(string); ok {
-				podCommand = append(podCommand, s)
-			}
-		}
-	}
-
-	if !c.stringSlicesEqual(podCommand, policy.Command) {
-		return fmt.Errorf("%s '%s': command %v does not match policy command %v", containerType, name, podCommand, policy.Command)
-	}
-	return nil
-}
-
-// checkArgs verifies the container's args match the policy
-func (c *PolicyVerificationController) checkArgs(container map[string]interface{}, name, containerType string, policy *ContainerPolicy) error {
-	var podArgs []string
-	if args, ok := container["args"].([]interface{}); ok {
-		for _, a := range args {
-			if s, ok := a.(string); ok {
-				podArgs = append(podArgs, s)
-			}
-		}
-	}
-
-	if !c.stringSlicesEqual(podArgs, policy.Args) {
-		return fmt.Errorf("%s '%s': args %v does not match policy args %v", containerType, name, podArgs, policy.Args)
-	}
-	return nil
-}
-
-// checkEnvVars verifies the container's environment variables match the policy
-func (c *PolicyVerificationController) checkEnvVars(container map[string]interface{}, name, containerType string, policy *ContainerPolicy) error {
-	var podEnv []EnvVar
-	if env, ok := container["env"].([]interface{}); ok {
-		for _, e := range env {
-			if envMap, ok := e.(map[string]interface{}); ok {
-				envVar := EnvVar{}
-				if n, ok := envMap["name"].(string); ok {
-					envVar.Name = n
-				}
-				if v, ok := envMap["value"].(string); ok {
-					envVar.Value = v
-				}
-				// Only include env vars with direct values (not valueFrom)
-				if envVar.Name != "" && envMap["valueFrom"] == nil {
-					podEnv = append(podEnv, envVar)
-				}
-			}
-		}
-	}
-
-	if !c.envVarsEqual(podEnv, policy.Env) {
-		return fmt.Errorf("%s '%s': env vars do not match policy", containerType, name)
-	}
-	return nil
-}
-
-// checkVolumeMounts verifies the container's volume mounts match the policy
-func (c *PolicyVerificationController) checkVolumeMounts(container map[string]interface{}, name, containerType string, policy *ContainerPolicy) error {
-	var podMounts []VolumeMount
-	if mounts, ok := container["volumeMounts"].([]interface{}); ok {
-		for _, m := range mounts {
-			if mountMap, ok := m.(map[string]interface{}); ok {
-				mount := VolumeMount{}
-				if n, ok := mountMap["name"].(string); ok {
-					mount.Name = n
-				}
-				if p, ok := mountMap["mountPath"].(string); ok {
-					mount.MountPath = p
-				}
-				if r, ok := mountMap["readOnly"].(bool); ok {
-					mount.ReadOnly = r
-				}
-				// Skip Kubernetes auto-injected service account token mounts
-				// These are injected by the kubelet and not part of the original pod spec
-				if strings.HasPrefix(mount.Name, "kube-api-access-") ||
-					mount.MountPath == "/var/run/secrets/kubernetes.io/serviceaccount" {
-					continue
-				}
-				podMounts = append(podMounts, mount)
-			}
-		}
-	}
-
-	if !c.volumeMountsEqual(podMounts, policy.VolumeMounts) {
-		return fmt.Errorf("%s '%s': volume mounts do not match policy", containerType, name)
-	}
-	return nil
-}
-
 // stringSlicesEqual checks if two string slices are equal (order matters)
 func (c *PolicyVerificationController) stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
@@ -463,42 +415,6 @@ func (c *PolicyVerificationController) stringSlicesEqual(a, b []string) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// envVarsEqual checks if two env var slices contain the same elements
-func (c *PolicyVerificationController) envVarsEqual(a, b []EnvVar) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	// Create map for comparison
-	aMap := make(map[string]string)
-	for _, env := range a {
-		aMap[env.Name] = env.Value
-	}
-	for _, env := range b {
-		if val, ok := aMap[env.Name]; !ok || val != env.Value {
-			return false
-		}
-	}
-	return true
-}
-
-// volumeMountsEqual checks if two volume mount slices contain the same elements
-func (c *PolicyVerificationController) volumeMountsEqual(a, b []VolumeMount) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	// Create map for comparison
-	aMap := make(map[string]VolumeMount)
-	for _, m := range a {
-		aMap[m.Name] = m
-	}
-	for _, m := range b {
-		if existing, ok := aMap[m.Name]; !ok || existing.MountPath != m.MountPath || existing.ReadOnly != m.ReadOnly {
 			return false
 		}
 	}
@@ -524,36 +440,6 @@ func (c *PolicyVerificationController) capabilitySetsEqual(a, b []string) bool {
 	}
 
 	return true
-}
-
-// checkNodeSelectors verifies node selectors match the policy exactly
-func (c *PolicyVerificationController) checkNodeSelectors(spec map[string]interface{}, policySelectors map[string]string) error {
-	podSelectors, _ := spec["nodeSelector"].(map[string]interface{})
-
-	// Convert pod selectors to map[string]string
-	podSelectorMap := make(map[string]string)
-	for key, value := range podSelectors {
-		if valueStr, ok := value.(string); ok {
-			podSelectorMap[key] = valueStr
-		}
-	}
-
-	// Check that pod and policy have the same node selectors
-	if len(podSelectorMap) != len(policySelectors) {
-		return fmt.Errorf("node selectors count mismatch: pod has %d, policy has %d", len(podSelectorMap), len(policySelectors))
-	}
-
-	for key, policyValue := range policySelectors {
-		podValue, exists := podSelectorMap[key]
-		if !exists {
-			return fmt.Errorf("node selector '%s' in policy but not in pod", key)
-		}
-		if podValue != policyValue {
-			return fmt.Errorf("node selector '%s': pod has '%s', policy has '%s'", key, podValue, policyValue)
-		}
-	}
-
-	return nil
 }
 
 // verifySignature verifies the signature against the hash

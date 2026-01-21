@@ -1,14 +1,12 @@
-{
-    "containers": {
-        "app": {
-            "args": [
-                "--config=/etc/app/config.yaml",
-                "--verbose"
-            ],
+[
+    {
+        "name": "app",
+        "properties": {
+            "image": "busybox:latest",
             "command": [
                 "/bin/myapp"
             ],
-            "env": [
+            "environmentVariables": [
                 {
                     "name": "APP_ENV",
                     "value": "production"
@@ -18,22 +16,18 @@
                     "value": "debug"
                 }
             ],
-            "image": "busybox:latest",
             "volumeMounts": [
                 {
-                    "mountPath": "/etc/app",
                     "name": "config",
+                    "mountPath": "/etc/app",
                     "readOnly": true
                 },
                 {
-                    "mountPath": "/data",
                     "name": "data",
+                    "mountPath": "/data",
                     "readOnly": false
                 }
             ]
         }
-    },
-    "nodeSelector": {
-        "node-type": "signed-workloads"
     }
-}
+]

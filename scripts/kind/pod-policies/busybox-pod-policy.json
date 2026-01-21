@@ -1,18 +1,13 @@
-{
-  "containers": {
-    "test": {
-      "args": [
-        "3600"
-      ],
+[
+  {
+    "name": "test",
+    "properties": {
+      "image": "busybox:latest",
       "command": [
         "sleep"
       ],
-      "env": [],
-      "image": "busybox:latest",
+      "environmentVariables": [],
       "volumeMounts": []
     }
-  },
-  "nodeSelector": {
-    "node-type": "signed-workloads"
   }
-}
+]

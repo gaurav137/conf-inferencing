@@ -1,14 +1,11 @@
-{
-  "containers": {
-    "test": {
-      "args": [],
-      "command": [],
-      "env": [],
+[
+  {
+    "name": "test",
+    "properties": {
       "image": "nginx:latest",
+      "command": [],
+      "environmentVariables": [],
       "volumeMounts": []
     }
-  },
-  "nodeSelector": {
-    "node-type": "signed-workloads"
   }
-}
+]
