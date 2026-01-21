@@ -80,6 +80,20 @@ EOF
     kubectl get nodes -o wide
 }
 
+label_and_taint_worker_node() {
+    log_info "Adding label and taint to worker node for signed pods only..."
+    
+    # Add label to worker node
+    kubectl label node "$WORKER_NODE_NAME" node-type=signed-workloads --overwrite
+    
+    # Add taint to worker node - only pods with matching toleration can be scheduled
+    kubectl taint node "$WORKER_NODE_NAME" signed-workloads=required:NoSchedule --overwrite
+    
+    log_info "Worker node labeled and tainted:"
+    kubectl get node "$WORKER_NODE_NAME" -o jsonpath='{.spec.taints}' | jq . 2>/dev/null || kubectl get node "$WORKER_NODE_NAME" -o jsonpath='{.spec.taints}'
+    echo ""
+}
+
 generate_proxy_certs() {
     log_info "Generating TLS certificates for kubelet-proxy..."
     
@@ -372,13 +386,14 @@ print_usage() {
     log_info "Deployment complete! Here's how to test:"
     echo ""
     echo "NOTE: kubelet-proxy is installed on the WORKER node only."
-    echo "      Pods scheduled to the control-plane will bypass the proxy."
+    echo "      The worker node has a taint 'signed-workloads=required:NoSchedule'."
+    echo "      Pods must have matching toleration AND node selector to be scheduled there."
     echo "      Signature verification is ENABLED - unsigned pods will be rejected."
     echo ""
     echo "1. Check kubelet-proxy logs on worker:"
     echo "   docker exec $WORKER_NODE_NAME journalctl -u kubelet-proxy -f"
     echo ""
-    echo "2. Sign and deploy a pod (will be allowed):"
+    echo "2. Sign and deploy a pod (must include toleration and nodeSelector):"
     echo "   ./scripts/sign-pod.sh sign-spec examples/test-pod.yaml | kubectl apply -f -"
     echo ""
     echo "3. Deploy an unsigned pod (will be rejected):"
@@ -419,6 +434,7 @@ main() {
     create_kubelet_proxy_kubeconfig
     create_setup_script
     create_cluster
+    label_and_taint_worker_node
     deploy_signing_server
     get_signing_cert
     deploy_to_node

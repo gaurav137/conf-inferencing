@@ -100,6 +100,13 @@ metadata:
   name: $name
   namespace: $namespace
 spec:
+  nodeSelector:
+    node-type: signed-workloads
+  tolerations:
+  - key: "signed-workloads"
+    operator: "Equal"
+    value: "required"
+    effect: "NoSchedule"
   containers:
   - name: test
     image: nginx:latest
@@ -207,6 +214,13 @@ metadata:
   annotations:
     kubelet-proxy.io/signature: "aW52YWxpZHNpZ25hdHVyZQ=="
 spec:
+  nodeSelector:
+    node-type: signed-workloads
+  tolerations:
+  - key: "signed-workloads"
+    operator: "Equal"
+    value: "required"
+    effect: "NoSchedule"
   containers:
   - name: test
     image: nginx:latest
