@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-# Script to sign pod specs using the signing-server for kubelet-proxy signature verification
+# Script to sign pod policies using the signing-server for kubelet-proxy signature verification
+# Instead of signing the full pod spec (which changes when Kubernetes adds defaults),
+# we generate a policy from the pod spec and sign that policy.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
@@ -15,9 +17,9 @@ usage() {
     echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  sign-spec <pod.yaml>       Sign a pod's spec and output with signature annotation"
-    echo "  verify-spec <pod.yaml>     Verify a pod's signature (requires local cert)"
+    echo "  sign-spec <pod.yaml>       Generate policy from pod, sign it, and output pod with annotations"
     echo "  get-cert                   Fetch the signing certificate from signing-server"
+    echo "  show-policy <pod.yaml>     Show the policy that would be generated (without signing)"
     echo ""
     echo "Environment variables:"
     echo "  SIGNING_SERVER_URL         URL to signing-server (default: http://localhost:8080)"
@@ -27,6 +29,7 @@ usage() {
     echo "  $0 sign-spec my-pod.yaml > signed-pod.yaml"
     echo "  kubectl apply -f signed-pod.yaml"
     echo "  $0 get-cert > signing-cert.pem"
+    echo "  $0 show-policy my-pod.yaml"
 }
 
 get_signing_server_url() {
@@ -60,6 +63,95 @@ get_cert() {
     fi
 }
 
+# Generate a policy JSON from a pod spec
+# The policy captures what the pod is allowed to do
+generate_policy() {
+    local pod_file="$1"
+    
+    python3 -c "
+import yaml
+import json
+import sys
+
+with open('$pod_file', 'r') as f:
+    pod = yaml.safe_load(f)
+
+spec = pod.get('spec', {})
+
+# Build the policy from the pod spec
+policy = {}
+
+# Extract allowed images from containers
+images = []
+for container in spec.get('containers', []):
+    if 'image' in container:
+        images.append(container['image'])
+for container in spec.get('initContainers', []):
+    if 'image' in container:
+        images.append(container['image'])
+if images:
+    policy['allowedImages'] = images
+
+# Extract host namespace settings
+if spec.get('hostNetwork'):
+    policy['allowHostNetwork'] = True
+if spec.get('hostPID'):
+    policy['allowHostPID'] = True
+if spec.get('hostIPC'):
+    policy['allowHostIPC'] = True
+
+# Extract security context settings (privileged, capabilities)
+privileged = False
+capabilities = set()
+for container in spec.get('containers', []) + spec.get('initContainers', []):
+    sec_ctx = container.get('securityContext', {})
+    if sec_ctx.get('privileged'):
+        privileged = True
+    caps = sec_ctx.get('capabilities', {})
+    for cap in caps.get('add', []):
+        capabilities.add(cap)
+
+if privileged:
+    policy['allowPrivileged'] = True
+if capabilities:
+    policy['allowedCapabilities'] = sorted(list(capabilities))
+
+# Extract node selectors
+node_selector = spec.get('nodeSelector', {})
+if node_selector:
+    policy['allowedNodeSelectors'] = node_selector
+
+# Output the policy as compact JSON with sorted keys
+def sort_dict(obj):
+    if isinstance(obj, dict):
+        return {k: sort_dict(v) for k, v in sorted(obj.items())}
+    elif isinstance(obj, list):
+        return [sort_dict(item) for item in obj]
+    return obj
+
+sorted_policy = sort_dict(policy)
+print(json.dumps(sorted_policy, separators=(',', ':')))
+"
+}
+
+show_policy() {
+    local pod_file="$1"
+    
+    if [[ -z "$pod_file" ]]; then
+        echo "Error: pod file required" >&2
+        usage
+        exit 1
+    fi
+    
+    if [[ ! -f "$pod_file" ]]; then
+        echo "Error: file not found: $pod_file" >&2
+        exit 1
+    fi
+    
+    echo "Policy that would be generated from $pod_file:" >&2
+    generate_policy "$pod_file" | python3 -m json.tool
+}
+
 sign_spec() {
     local pod_file="$1"
     
@@ -79,49 +171,38 @@ sign_spec() {
     local url
     url=$(get_signing_server_url)
     
-    # Check if we have yq or python for YAML/JSON processing
-    if command -v yq &>/dev/null; then
-        YAML_TOOL="yq"
-    elif command -v python3 &>/dev/null; then
-        YAML_TOOL="python"
-    else
-        echo "Error: yq or python3 required for YAML processing" >&2
+    # Check if we have python3 for YAML/JSON processing
+    if ! command -v python3 &>/dev/null; then
+        echo "Error: python3 required for YAML processing" >&2
         exit 1
     fi
     
-    # Extract the spec as canonical JSON
-    local spec_json
-    if [[ "$YAML_TOOL" == "yq" ]]; then
-        spec_json=$(yq -o=json '.spec' "$pod_file" | jq -cS '.')
-    else
-        spec_json=$(python3 -c "
-import yaml
-import json
-import sys
-
-with open('$pod_file', 'r') as f:
-    pod = yaml.safe_load(f)
-
-def sort_dict(obj):
-    if isinstance(obj, dict):
-        return {k: sort_dict(v) for k, v in sorted(obj.items())}
-    elif isinstance(obj, list):
-        return [sort_dict(item) for item in obj]
-    return obj
-
-spec = sort_dict(pod.get('spec', {}))
-print(json.dumps(spec, separators=(',', ':')))
-")
+    # Generate policy from the pod spec
+    local policy_json
+    policy_json=$(generate_policy "$pod_file")
+    
+    if [[ -z "$policy_json" ]]; then
+        echo "Error: Failed to generate policy from pod spec" >&2
+        exit 1
     fi
     
-    # Call signing-server to sign the spec
+    echo "Generated policy: $policy_json" >&2
+    
+    # Base64 encode the policy for the annotation
+    local policy_base64
+    policy_base64=$(printf '%s' "$policy_json" | base64 -w 0)
+    
+    echo "Policy base64: $policy_base64" >&2
+    
+    # Call signing-server to sign the base64-encoded policy
+    # This ensures we sign exactly what's stored in the annotation
     local response
     response=$(curl -sf -X POST "$url/sign" \
         -H "Content-Type: application/json" \
-        -d "{\"payload\": $(echo "$spec_json" | jq -Rs .)}")
+        -d "{\"payload\": $(printf '%s' "$policy_base64" | jq -Rs .)}")
     
     if [[ $? -ne 0 ]]; then
-        echo "Error: Failed to sign pod spec" >&2
+        echo "Error: Failed to sign policy" >&2
         exit 1
     fi
     
@@ -133,11 +214,10 @@ print(json.dumps(spec, separators=(',', ':')))
         exit 1
     fi
     
-    # Output the pod with the signature annotation added
-    if [[ "$YAML_TOOL" == "yq" ]]; then
-        yq eval ".metadata.annotations.\"kubelet-proxy.io/signature\" = \"$signature\"" "$pod_file"
-    else
-        python3 -c "
+    echo "Signature: $signature" >&2
+    
+    # Output the pod with the policy and signature annotations added
+    python3 -c "
 import yaml
 import sys
 
@@ -149,124 +229,34 @@ if 'metadata' not in pod:
 if 'annotations' not in pod['metadata']:
     pod['metadata']['annotations'] = {}
 
+# Add the base64-encoded policy
+pod['metadata']['annotations']['kubelet-proxy.io/policy'] = '$policy_base64'
+# Add the signature
 pod['metadata']['annotations']['kubelet-proxy.io/signature'] = '$signature'
 
 yaml.dump(pod, sys.stdout, default_flow_style=False)
 "
-    fi
     
     echo "" >&2
-    echo "Signature added to pod spec" >&2
-    echo "Spec hash (for debugging): $(echo -n "$spec_json" | sha256sum | cut -d' ' -f1)" >&2
+    echo "Policy and signature added to pod spec" >&2
 }
 
-verify_spec() {
-    local pod_file="$1"
-    
-    if [[ -z "$pod_file" ]]; then
-        echo "Error: pod file required" >&2
-        usage
-        exit 1
-    fi
-    
-    if [[ ! -f "$pod_file" ]]; then
-        echo "Error: file not found: $pod_file" >&2
-        exit 1
-    fi
-    
-    # Try to find certificate - check KEY_DIR first, then tmp/certs
-    local cert_file=""
-    if [[ -f "$KEY_DIR/signing.crt" ]]; then
-        cert_file="$KEY_DIR/signing.crt"
-    elif [[ -f "$KEY_DIR/signing-cert.pem" ]]; then
-        cert_file="$KEY_DIR/signing-cert.pem"
-    elif [[ -f "$PROJECT_ROOT/tmp/certs/signing-cert.pem" ]]; then
-        cert_file="$PROJECT_ROOT/tmp/certs/signing-cert.pem"
-    fi
-    
-    if [[ -z "$cert_file" || ! -f "$cert_file" ]]; then
-        echo "Error: signing certificate not found." >&2
-        echo "Run '$0 get-cert > \$KEY_DIR/signing-cert.pem' first." >&2
-        exit 1
-    fi
-    
-    # Check for yq or python
-    if command -v yq &>/dev/null; then
-        YAML_TOOL="yq"
-    elif command -v python3 &>/dev/null; then
-        YAML_TOOL="python"
-    else
-        echo "Error: yq or python3 required for YAML processing" >&2
-        exit 1
-    fi
-    
-    # Extract signature and spec
-    local signature spec_json
-    if [[ "$YAML_TOOL" == "yq" ]]; then
-        signature=$(yq '.metadata.annotations."kubelet-proxy.io/signature"' "$pod_file")
-        spec_json=$(yq -o=json '.spec' "$pod_file" | jq -cS '.')
-    else
-        signature=$(python3 -c "
-import yaml
-with open('$pod_file', 'r') as f:
-    pod = yaml.safe_load(f)
-print(pod.get('metadata', {}).get('annotations', {}).get('kubelet-proxy.io/signature', ''))
-")
-        spec_json=$(python3 -c "
-import yaml
-import json
-
-with open('$pod_file', 'r') as f:
-    pod = yaml.safe_load(f)
-
-def sort_dict(obj):
-    if isinstance(obj, dict):
-        return {k: sort_dict(v) for k, v in sorted(obj.items())}
-    elif isinstance(obj, list):
-        return [sort_dict(item) for item in obj]
-    return obj
-
-spec = sort_dict(pod.get('spec', {}))
-print(json.dumps(spec, separators=(',', ':')))
-")
-    fi
-    
-    if [[ -z "$signature" || "$signature" == "null" ]]; then
-        echo "Error: no signature found in pod" >&2
-        exit 1
-    fi
-    
-    # Extract public key from certificate
-    local pubkey_file
-    pubkey_file=$(mktemp)
-    openssl x509 -in "$cert_file" -pubkey -noout > "$pubkey_file" 2>/dev/null
-    
-    # Verify
-    echo "Verifying signature..."
-    echo "Spec hash: $(echo -n "$spec_json" | sha256sum | cut -d' ' -f1)"
-    
-    if echo -n "$spec_json" | openssl dgst -sha256 -verify "$pubkey_file" -signature <(echo "$signature" | base64 -d) 2>/dev/null; then
-        echo "✓ Signature is VALID"
-        rm -f "$pubkey_file"
-    else
-        echo "✗ Signature is INVALID"
-        rm -f "$pubkey_file"
-        exit 1
-    fi
-}
-
-# Main
+# Parse arguments
 case "${1:-}" in
     sign-spec)
         sign_spec "$2"
         ;;
-    verify-spec)
-        verify_spec "$2"
-        ;;
     get-cert)
         get_cert
         ;;
+    show-policy)
+        show_policy "$2"
+        ;;
+    -h|--help)
+        usage
+        ;;
     *)
+        echo "Error: Unknown command '${1:-}'" >&2
         usage
         exit 1
         ;;

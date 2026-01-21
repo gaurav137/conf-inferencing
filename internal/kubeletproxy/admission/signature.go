@@ -12,19 +12,50 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
+	"regexp"
+	"strings"
 )
 
 const (
-	// SignatureAnnotation is the annotation key for the pod spec signature
-	SignatureAnnotation = "kubelet-proxy.io/signature"
+	// PolicyAnnotation is the annotation key for the signed policy (base64-encoded JSON)
+	PolicyAnnotation = "kubelet-proxy.io/policy"
 
-	// SignatureAlgorithmAnnotation optionally specifies the signature algorithm
-	// Defaults to "sha256" if not specified
-	SignatureAlgorithmAnnotation = "kubelet-proxy.io/signature-algorithm"
+	// SignatureAnnotation is the annotation key for the policy signature
+	SignatureAnnotation = "kubelet-proxy.io/signature"
 )
 
-// SignatureVerificationController verifies pod spec signatures
+// Policy defines what a pod is allowed to do
+// This is extracted from the pod spec at signing time and verified at admission time
+type Policy struct {
+	// AllowedImages is a list of allowed container image patterns (supports wildcards)
+	AllowedImages []string `json:"allowedImages,omitempty"`
+
+	// AllowedServiceAccounts is a list of allowed service account names
+	AllowedServiceAccounts []string `json:"allowedServiceAccounts,omitempty"`
+
+	// AllowHostNetwork indicates whether hostNetwork is allowed
+	AllowHostNetwork bool `json:"allowHostNetwork,omitempty"`
+
+	// AllowHostPID indicates whether hostPID is allowed
+	AllowHostPID bool `json:"allowHostPID,omitempty"`
+
+	// AllowHostIPC indicates whether hostIPC is allowed
+	AllowHostIPC bool `json:"allowHostIPC,omitempty"`
+
+	// AllowPrivileged indicates whether privileged containers are allowed
+	AllowPrivileged bool `json:"allowPrivileged,omitempty"`
+
+	// AllowedCapabilities lists allowed Linux capabilities
+	AllowedCapabilities []string `json:"allowedCapabilities,omitempty"`
+
+	// AllowedVolumeMounts lists allowed volume mount paths (supports wildcards)
+	AllowedVolumeMounts []string `json:"allowedVolumeMounts,omitempty"`
+
+	// AllowedNodeSelectors lists allowed node selector key-value pairs
+	AllowedNodeSelectors map[string]string `json:"allowedNodeSelectors,omitempty"`
+}
+
+// SignatureVerificationController verifies pod policy signatures
 type SignatureVerificationController struct {
 	publicKey crypto.PublicKey
 	certPath  string
@@ -54,7 +85,7 @@ func (c *SignatureVerificationController) Name() string {
 	return "signature-verification"
 }
 
-// Admit verifies the pod spec signature
+// Admit verifies the pod policy signature and checks if the pod matches the policy
 func (c *SignatureVerificationController) Admit(req *Request) *Decision {
 	// Allow all pods in kube-system namespace without signature verification
 	if req.Namespace == "kube-system" {
@@ -62,47 +93,60 @@ func (c *SignatureVerificationController) Admit(req *Request) *Decision {
 		return Allow("kube-system namespace is exempt from signature verification")
 	}
 
-	// Get the signature from annotations
-	signature, hasSignature := c.getSignatureAnnotation(req.Pod)
+	// Get the policy and signature from annotations
+	policyStr, hasPolicy := c.getAnnotation(req.Pod, PolicyAnnotation)
+	if !hasPolicy {
+		c.logger.Printf("Pod %s/%s has no policy annotation", req.Namespace, req.Name)
+		return Deny("pod policy required but not found (missing annotation: " + PolicyAnnotation + ")")
+	}
+
+	signature, hasSignature := c.getAnnotation(req.Pod, SignatureAnnotation)
 	if !hasSignature {
-		// No signature annotation - deny by default when signature verification is enabled
 		c.logger.Printf("Pod %s/%s has no signature annotation", req.Namespace, req.Name)
-		return Deny("pod spec signature required but not found (missing annotation: " + SignatureAnnotation + ")")
+		return Deny("pod signature required but not found (missing annotation: " + SignatureAnnotation + ")")
 	}
 
-	// Extract and canonicalize the pod spec
-	spec, err := c.extractPodSpec(req.Pod)
+	// Decode the policy from base64
+	policyBytes, err := base64.StdEncoding.DecodeString(policyStr)
 	if err != nil {
-		c.logger.Printf("Failed to extract pod spec for %s/%s: %v", req.Namespace, req.Name, err)
-		return Deny(fmt.Sprintf("failed to extract pod spec: %v", err))
+		c.logger.Printf("Invalid policy encoding for %s/%s: %v", req.Namespace, req.Name, err)
+		return Deny("invalid policy encoding: must be base64")
 	}
 
-	// Compute hash of the canonical spec
-	specHash, err := c.computeSpecHash(spec)
-	if err != nil {
-		c.logger.Printf("Failed to compute spec hash for %s/%s: %v", req.Namespace, req.Name, err)
-		return Deny(fmt.Sprintf("failed to compute spec hash: %v", err))
+	var policy Policy
+	if err := json.Unmarshal(policyBytes, &policy); err != nil {
+		c.logger.Printf("Invalid policy JSON for %s/%s: %v", req.Namespace, req.Name, err)
+		return Deny(fmt.Sprintf("invalid policy JSON: %v", err))
 	}
 
-	// Decode the signature
+	// Verify the signature on the base64-encoded policy (what was actually signed)
+	// We sign the base64 string, not the decoded bytes, for consistency
+	policyHash := sha256.Sum256([]byte(policyStr))
 	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
 		c.logger.Printf("Invalid signature encoding for %s/%s: %v", req.Namespace, req.Name, err)
 		return Deny("invalid signature encoding: must be base64")
 	}
 
-	// Verify the signature
-	if err := c.verifySignature(specHash, signatureBytes); err != nil {
-		c.logger.Printf("Signature verification failed for %s/%s: %v", req.Namespace, req.Name, err)
-		return Deny(fmt.Sprintf("signature verification failed: %v", err))
+	if err := c.verifySignature(policyHash[:], signatureBytes); err != nil {
+		c.logger.Printf("Policy signature verification failed for %s/%s: %v", req.Namespace, req.Name, err)
+		return Deny(fmt.Sprintf("policy signature verification failed: %v", err))
 	}
 
-	c.logger.Printf("Signature verified for pod %s/%s", req.Namespace, req.Name)
-	return Allow("signature verified")
+	c.logger.Printf("Policy signature verified for pod %s/%s", req.Namespace, req.Name)
+
+	// Check if the pod matches the policy
+	if err := c.checkPodAgainstPolicy(req.Pod, &policy); err != nil {
+		c.logger.Printf("Pod %s/%s does not match policy: %v", req.Namespace, req.Name, err)
+		return Deny(fmt.Sprintf("pod does not match policy: %v", err))
+	}
+
+	c.logger.Printf("Pod %s/%s matches signed policy, allowing", req.Namespace, req.Name)
+	return Allow("pod matches signed policy")
 }
 
-// getSignatureAnnotation extracts the signature from pod annotations
-func (c *SignatureVerificationController) getSignatureAnnotation(pod map[string]interface{}) (string, bool) {
+// getAnnotation extracts an annotation from pod metadata
+func (c *SignatureVerificationController) getAnnotation(pod map[string]interface{}, key string) (string, bool) {
 	metadata, ok := pod["metadata"].(map[string]interface{})
 	if !ok {
 		return "", false
@@ -113,30 +157,210 @@ func (c *SignatureVerificationController) getSignatureAnnotation(pod map[string]
 		return "", false
 	}
 
-	signature, ok := annotations[SignatureAnnotation].(string)
-	return signature, ok
+	value, ok := annotations[key].(string)
+	return value, ok
 }
 
-// extractPodSpec extracts the spec from a pod object
-func (c *SignatureVerificationController) extractPodSpec(pod map[string]interface{}) (map[string]interface{}, error) {
+// checkPodAgainstPolicy verifies the pod spec matches the signed policy
+func (c *SignatureVerificationController) checkPodAgainstPolicy(pod map[string]interface{}, policy *Policy) error {
 	spec, ok := pod["spec"].(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("pod has no spec")
+		return fmt.Errorf("pod has no spec")
 	}
-	return spec, nil
+
+	// Check container images
+	if err := c.checkContainerImages(spec, policy.AllowedImages); err != nil {
+		return err
+	}
+
+	// Check host namespaces
+	if err := c.checkHostNamespaces(spec, policy); err != nil {
+		return err
+	}
+
+	// Check privileged containers and capabilities
+	if err := c.checkSecurityContext(spec, policy); err != nil {
+		return err
+	}
+
+	// Check node selectors
+	if err := c.checkNodeSelectors(spec, policy.AllowedNodeSelectors); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-// computeSpecHash computes a SHA256 hash of the canonicalized pod spec
-func (c *SignatureVerificationController) computeSpecHash(spec map[string]interface{}) ([]byte, error) {
-	// Canonicalize the spec by marshaling to JSON with sorted keys
-	canonicalJSON, err := canonicalizeJSON(spec)
-	if err != nil {
-		return nil, fmt.Errorf("failed to canonicalize spec: %w", err)
+// checkContainerImages verifies all container images match the allowed patterns
+func (c *SignatureVerificationController) checkContainerImages(spec map[string]interface{}, allowedImages []string) error {
+	if len(allowedImages) == 0 {
+		return nil // No image restrictions
 	}
 
-	// Compute SHA256 hash
-	hash := sha256.Sum256(canonicalJSON)
-	return hash[:], nil
+	// Check containers
+	if containers, ok := spec["containers"].([]interface{}); ok {
+		for _, container := range containers {
+			if containerMap, ok := container.(map[string]interface{}); ok {
+				image, _ := containerMap["image"].(string)
+				if !c.imageMatchesPatterns(image, allowedImages) {
+					return fmt.Errorf("container image '%s' not allowed by policy", image)
+				}
+			}
+		}
+	}
+
+	// Check initContainers
+	if initContainers, ok := spec["initContainers"].([]interface{}); ok {
+		for _, container := range initContainers {
+			if containerMap, ok := container.(map[string]interface{}); ok {
+				image, _ := containerMap["image"].(string)
+				if !c.imageMatchesPatterns(image, allowedImages) {
+					return fmt.Errorf("init container image '%s' not allowed by policy", image)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// imageMatchesPatterns checks if an image matches any of the allowed patterns
+func (c *SignatureVerificationController) imageMatchesPatterns(image string, patterns []string) bool {
+	for _, pattern := range patterns {
+		if c.matchWildcard(pattern, image) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchWildcard matches a string against a pattern with * wildcards
+func (c *SignatureVerificationController) matchWildcard(pattern, str string) bool {
+	// Convert wildcard pattern to regex
+	regexPattern := "^" + regexp.QuoteMeta(pattern) + "$"
+	regexPattern = strings.ReplaceAll(regexPattern, `\*`, ".*")
+
+	matched, err := regexp.MatchString(regexPattern, str)
+	if err != nil {
+		return false
+	}
+	return matched
+}
+
+// checkHostNamespaces verifies host namespace settings match the policy
+func (c *SignatureVerificationController) checkHostNamespaces(spec map[string]interface{}, policy *Policy) error {
+	hostNetwork, _ := spec["hostNetwork"].(bool)
+	if hostNetwork && !policy.AllowHostNetwork {
+		return fmt.Errorf("hostNetwork not allowed by policy")
+	}
+
+	hostPID, _ := spec["hostPID"].(bool)
+	if hostPID && !policy.AllowHostPID {
+		return fmt.Errorf("hostPID not allowed by policy")
+	}
+
+	hostIPC, _ := spec["hostIPC"].(bool)
+	if hostIPC && !policy.AllowHostIPC {
+		return fmt.Errorf("hostIPC not allowed by policy")
+	}
+
+	return nil
+}
+
+// checkSecurityContext verifies security context settings match the policy
+func (c *SignatureVerificationController) checkSecurityContext(spec map[string]interface{}, policy *Policy) error {
+	// Check containers
+	if containers, ok := spec["containers"].([]interface{}); ok {
+		for _, container := range containers {
+			if containerMap, ok := container.(map[string]interface{}); ok {
+				if err := c.checkContainerSecurityContext(containerMap, policy); err != nil {
+					name, _ := containerMap["name"].(string)
+					return fmt.Errorf("container '%s': %v", name, err)
+				}
+			}
+		}
+	}
+
+	// Check initContainers
+	if initContainers, ok := spec["initContainers"].([]interface{}); ok {
+		for _, container := range initContainers {
+			if containerMap, ok := container.(map[string]interface{}); ok {
+				if err := c.checkContainerSecurityContext(containerMap, policy); err != nil {
+					name, _ := containerMap["name"].(string)
+					return fmt.Errorf("init container '%s': %v", name, err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkContainerSecurityContext checks a single container's security context
+func (c *SignatureVerificationController) checkContainerSecurityContext(container map[string]interface{}, policy *Policy) error {
+	securityContext, ok := container["securityContext"].(map[string]interface{})
+	if !ok {
+		return nil // No security context
+	}
+
+	// Check privileged
+	privileged, _ := securityContext["privileged"].(bool)
+	if privileged && !policy.AllowPrivileged {
+		return fmt.Errorf("privileged containers not allowed by policy")
+	}
+
+	// Check capabilities
+	if capabilities, ok := securityContext["capabilities"].(map[string]interface{}); ok {
+		if add, ok := capabilities["add"].([]interface{}); ok {
+			for _, cap := range add {
+				capStr, _ := cap.(string)
+				if !c.isCapabilityAllowed(capStr, policy.AllowedCapabilities) {
+					return fmt.Errorf("capability '%s' not allowed by policy", capStr)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// isCapabilityAllowed checks if a capability is in the allowed list
+func (c *SignatureVerificationController) isCapabilityAllowed(cap string, allowedCaps []string) bool {
+	if len(allowedCaps) == 0 {
+		return true // No restrictions
+	}
+	for _, allowed := range allowedCaps {
+		if strings.EqualFold(allowed, cap) || allowed == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+// checkNodeSelectors verifies node selectors match the policy
+func (c *SignatureVerificationController) checkNodeSelectors(spec map[string]interface{}, allowedSelectors map[string]string) error {
+	if len(allowedSelectors) == 0 {
+		return nil // No restrictions
+	}
+
+	nodeSelector, ok := spec["nodeSelector"].(map[string]interface{})
+	if !ok {
+		return nil // No node selector in pod
+	}
+
+	// Check that pod's node selector matches what's allowed
+	for key, value := range nodeSelector {
+		valueStr, _ := value.(string)
+		allowedValue, exists := allowedSelectors[key]
+		if !exists {
+			return fmt.Errorf("node selector key '%s' not allowed by policy", key)
+		}
+		if allowedValue != "*" && allowedValue != valueStr {
+			return fmt.Errorf("node selector '%s=%s' not allowed by policy (allowed: %s)", key, valueStr, allowedValue)
+		}
+	}
+
+	return nil
 }
 
 // verifySignature verifies the signature against the hash
@@ -192,71 +416,5 @@ func loadPublicKey(certPath string) (crypto.PublicKey, error) {
 
 	default:
 		return nil, fmt.Errorf("unsupported PEM type: %s", block.Type)
-	}
-}
-
-// canonicalizeJSON converts a map to canonical JSON (sorted keys, no extra whitespace)
-func canonicalizeJSON(v interface{}) ([]byte, error) {
-	// First marshal to get a clean representation
-	data, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-
-	// Unmarshal into an ordered structure and re-marshal
-	var obj interface{}
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return nil, err
-	}
-
-	return marshalCanonical(obj)
-}
-
-// marshalCanonical marshals to JSON with sorted keys
-func marshalCanonical(v interface{}) ([]byte, error) {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		// Sort keys
-		keys := make([]string, 0, len(val))
-		for k := range val {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		// Build canonical JSON
-		result := []byte("{")
-		for i, k := range keys {
-			if i > 0 {
-				result = append(result, ',')
-			}
-			keyJSON, _ := json.Marshal(k)
-			result = append(result, keyJSON...)
-			result = append(result, ':')
-			valJSON, err := marshalCanonical(val[k])
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, valJSON...)
-		}
-		result = append(result, '}')
-		return result, nil
-
-	case []interface{}:
-		result := []byte("[")
-		for i, item := range val {
-			if i > 0 {
-				result = append(result, ',')
-			}
-			itemJSON, err := marshalCanonical(item)
-			if err != nil {
-				return nil, err
-			}
-			result = append(result, itemJSON...)
-		}
-		result = append(result, ']')
-		return result, nil
-
-	default:
-		return json.Marshal(v)
 	}
 }
