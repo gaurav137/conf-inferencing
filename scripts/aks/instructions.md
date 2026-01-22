@@ -1,4 +1,4 @@
-Instuctions to generate deploy-aks.sh
+Instructions to generate deploy-aks.sh
 
 - Use az cli for any Azure interactions.
 - Use default Azure location as central india unless overridden.
