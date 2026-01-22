@@ -18,6 +18,7 @@
 #   --local-binary FILE       Use local binary instead of downloading from GitHub
 #   --version VERSION         Kubelet-proxy version to install (default: latest)
 #   --signing-cert-file FILE  Path to local signing certificate file (instead of URL)
+#   --signing-cert-url-ca-cert FILE  CA certificate for verifying signing cert URL (for curl --cacert)
 #   --github-repo REPO        GitHub repository (default: gaurav137/conf-inferencing)
 #   --proxy-listen-addr ADDR  Proxy listen address (default: 127.0.0.1:6444)
 #   --skip-kubelet-restart    Don't restart kubelet after installation
@@ -61,6 +62,7 @@ PROXY_CERT_DIR="/etc/kubelet-proxy"
 PROXY_BIN_PATH="/usr/local/bin/kubelet-proxy"
 SIGNING_CERT_URL=""
 SIGNING_CERT_FILE=""
+SIGNING_CERT_URL_CA_CERT=""
 LOCAL_BINARY=""
 SKIP_KUBELET_RESTART=false
 CONFIG_FILE=""
@@ -90,6 +92,10 @@ parse_args() {
                 ;;
             --signing-cert-file)
                 SIGNING_CERT_FILE="$2"
+                shift 2
+                ;;
+            --signing-cert-url-ca-cert)
+                SIGNING_CERT_URL_CA_CERT="$2"
                 shift 2
                 ;;
             --local-binary)
@@ -152,6 +158,11 @@ load_config() {
     if [[ -z "$SIGNING_CERT_FILE" ]]; then
         val=$(jq -r '.signingCertFile // empty' "$CONFIG_FILE")
         [[ -n "$val" ]] && SIGNING_CERT_FILE="$val"
+    fi
+
+    if [[ -z "$SIGNING_CERT_URL_CA_CERT" ]]; then
+        val=$(jq -r '.signingCertUrlCaCert // empty' "$CONFIG_FILE")
+        [[ -n "$val" ]] && SIGNING_CERT_URL_CA_CERT="$val"
     fi
 
     if [[ -z "$VERSION" ]]; then
@@ -223,6 +234,11 @@ check_prerequisites() {
 
     if [[ -n "$LOCAL_BINARY" && ! -f "$LOCAL_BINARY" ]]; then
         log_error "Local binary not found: $LOCAL_BINARY"
+        exit 1
+    fi
+
+    if [[ -n "$SIGNING_CERT_URL_CA_CERT" && ! -f "$SIGNING_CERT_URL_CA_CERT" ]]; then
+        log_error "CA certificate file not found: $SIGNING_CERT_URL_CA_CERT"
         exit 1
     fi
 
@@ -373,7 +389,12 @@ fetch_signing_cert() {
         cp "$SIGNING_CERT_FILE" "$PROXY_CERT_DIR/signing-cert.pem"
     else
         log_info "Downloading signing certificate from $SIGNING_CERT_URL"
-        if ! curl -sf "$SIGNING_CERT_URL" -o "$PROXY_CERT_DIR/signing-cert.pem"; then
+        local curl_opts="-sf"
+        if [[ -n "$SIGNING_CERT_URL_CA_CERT" ]]; then
+            log_info "Using CA certificate: $SIGNING_CERT_URL_CA_CERT"
+            curl_opts="$curl_opts --cacert $SIGNING_CERT_URL_CA_CERT"
+        fi
+        if ! curl $curl_opts "$SIGNING_CERT_URL" -o "$PROXY_CERT_DIR/signing-cert.pem"; then
             log_error "Failed to download signing certificate"
             exit 1
         fi

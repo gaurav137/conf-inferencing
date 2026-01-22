@@ -94,25 +94,36 @@ label_and_taint_worker_node() {
 }
 
 deploy_signing_server() {
-    log_info "Starting signing-server as local Docker container..."
+    log_info "Starting signing-server as local Docker container with TLS..."
     
     # Stop existing container if running
     docker stop "$SIGNING_SERVER_CONTAINER" 2>/dev/null || true
     docker rm "$SIGNING_SERVER_CONTAINER" 2>/dev/null || true
     
-    # Run signing-server container
+    # Get host IP that will be accessible from kind nodes (IPv4 only)
+    local host_ip
+    host_ip=$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    if [ -z "$host_ip" ]; then
+        host_ip="172.17.0.1"
+    fi
+    log_info "Using host IP for TLS SANs: $host_ip"
+    
+    # Run signing-server container with TLS enabled
+    # Include both localhost and the Docker gateway IP as SANs for the TLS cert
     docker run -d \
         --name "$SIGNING_SERVER_CONTAINER" \
         -p "$SIGNING_SERVER_PORT:8080" \
         "$SIGNING_SERVER_IMAGE" \
         --listen-addr=:8080 \
-        --auto-generate=true
+        --auto-generate=true \
+        --tls=true \
+        --tls-hosts="localhost,127.0.0.1,${host_ip}"
     
-    # Wait for signing-server to be ready
-    log_info "Waiting for signing-server to be ready..."
+    # Wait for signing-server to be ready (now using HTTPS)
+    log_info "Waiting for signing-server to be ready (HTTPS)..."
     for i in {1..20}; do
-        if curl -sf "http://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
-            log_info "Signing server is running at http://localhost:$SIGNING_SERVER_PORT"
+        if curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
+            log_info "Signing server is running at https://localhost:$SIGNING_SERVER_PORT"
             return 0
         fi
         sleep 0.5
@@ -123,49 +134,50 @@ deploy_signing_server() {
     exit 1
 }
 
-get_signing_cert() {
-    log_info "Fetching signing certificate from signing-server..."
-    
-    local cert_dir="$PROJECT_ROOT/tmp/certs"
-    
-    # Fetch the certificate from local signing-server
-    curl -sf "http://localhost:$SIGNING_SERVER_PORT/signingcert" > "$cert_dir/signing-cert.pem"
-    
-    if [[ ! -s "$cert_dir/signing-cert.pem" ]]; then
-        log_error "Failed to fetch signing certificate"
-        exit 1
-    fi
-    
-    log_info "Signing certificate saved to $cert_dir/signing-cert.pem"
-}
-
 deploy_to_node() {
     log_info "Deploying kubelet-proxy to worker node using install.sh: $WORKER_NODE_NAME"
     
-    local tmp_dir="$PROJECT_ROOT/tmp"
-    local cert_dir="$tmp_dir/certs"
     local staging_dir="/opt/kubelet-proxy-staging"
+    
+    # Get host IP that is accessible from kind node (IPv4 only)
+    local host_ip
+    host_ip=$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    if [ -z "$host_ip" ]; then
+        host_ip="172.17.0.1"
+    fi
+    local signing_cert_url="https://${host_ip}:${SIGNING_SERVER_PORT}/signingcert"
     
     # Create staging directory on node
     docker exec "$WORKER_NODE_NAME" mkdir -p "$staging_dir"
     
+    # Download TLS certificate from signing-server for CA verification
+    log_info "Downloading TLS certificate from signing-server..."
+    local tls_cert_file="$PROJECT_ROOT/tmp/signing-server-tls.crt"
+    curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/tlscert" -o "$tls_cert_file" || {
+        log_error "Failed to download TLS certificate from signing-server"
+        exit 1
+    }
+    log_info "TLS certificate downloaded to $tls_cert_file"
+    
     # Copy files to worker node
     log_info "Copying files to worker node..."
     
-    # Copy local binary, install script, and signing cert
+    # Copy local binary, install script, and TLS cert
     docker cp "$PROJECT_ROOT/bin/kubelet-proxy-linux-amd64" "$WORKER_NODE_NAME:$staging_dir/kubelet-proxy"
     docker cp "$PROJECT_ROOT/scripts/install.sh" "$WORKER_NODE_NAME:$staging_dir/install.sh"
-    docker cp "$cert_dir/signing-cert.pem" "$WORKER_NODE_NAME:$staging_dir/signing-cert.pem"
+    docker cp "$tls_cert_file" "$WORKER_NODE_NAME:$staging_dir/signing-server-tls.crt"
     
     # Verify files were copied
     log_info "Verifying files on node..."
     docker exec "$WORKER_NODE_NAME" ls -la "$staging_dir/"
     
-    # Run install.sh with local binary and signing cert
+    # Run install.sh with local binary, signing cert URL, and TLS CA cert
     log_info "Running install.sh on worker node..."
+    log_info "Signing cert URL: $signing_cert_url"
     docker exec "$WORKER_NODE_NAME" bash "$staging_dir/install.sh" \
         --local-binary "$staging_dir/kubelet-proxy" \
-        --signing-cert-file "$staging_dir/signing-cert.pem" \
+        --signing-cert-url "$signing_cert_url" \
+        --signing-cert-url-ca-cert "$staging_dir/signing-server-tls.crt" \
         --proxy-listen-addr "$PROXY_LISTEN_ADDR"
 }
 
@@ -210,7 +222,7 @@ print_usage() {
     echo ""
     echo "4. Check signing-server:"
     echo "   docker logs $SIGNING_SERVER_CONTAINER"
-    echo "   curl http://localhost:$SIGNING_SERVER_PORT/health"
+    echo "   curl --insecure https://localhost:$SIGNING_SERVER_PORT/health"
     echo ""
     echo "5. Clean up:"
     echo "   kind delete cluster --name $CLUSTER_NAME"
@@ -228,7 +240,6 @@ main() {
     
     # Create tmp directory
     mkdir -p "$PROJECT_ROOT/tmp"
-    mkdir -p "$PROJECT_ROOT/tmp/certs"
     mkdir -p /tmp/kubelet-proxy-logs
     
     # Run deployment steps
@@ -238,7 +249,6 @@ main() {
     create_cluster
     label_and_taint_worker_node
     deploy_signing_server
-    get_signing_cert
     deploy_to_node
     verify_deployment
     print_usage

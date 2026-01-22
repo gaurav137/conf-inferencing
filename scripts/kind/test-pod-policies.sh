@@ -61,9 +61,13 @@ check_signing_server() {
     docker ps --filter "name=$SIGNING_SERVER_CONTAINER" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
     echo ""
     
-    # Verify signing-server is responding
-    if curl -sf "http://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
-        log_info "Signing server is HEALTHY"
+    # Verify signing-server is responding (try HTTPS first, then HTTP)
+    if curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
+        log_info "Signing server is HEALTHY (HTTPS)"
+        SIGNING_SERVER_URL="https://localhost:$SIGNING_SERVER_PORT"
+    elif curl -sf "http://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
+        log_info "Signing server is HEALTHY (HTTP)"
+        SIGNING_SERVER_URL="http://localhost:$SIGNING_SERVER_PORT"
     else
         log_error "Signing server is NOT responding"
         docker logs "$SIGNING_SERVER_CONTAINER" --tail 20
@@ -120,7 +124,8 @@ sign_policy() {
     local policy_base64="$1"
     
     local response
-    response=$(curl -sf -X POST "$SIGNING_SERVER_URL/sign" \
+    # Use --insecure for HTTPS with self-signed cert
+    response=$(curl -sf --insecure -X POST "$SIGNING_SERVER_URL/sign" \
         -H "Content-Type: application/json" \
         -d "{\"payload\": $(printf '%s' "$policy_base64" | jq -Rs .)}")
     
