@@ -82,7 +82,6 @@ EOF
                 break
             else
                 log_error "Test pod is running on unexpected node '$pod_node' instead of '$vm_name'"
-                kubectl delete pod test-pod-policy-pod --ignore-not-found=true
                 exit 1
             fi
         fi
@@ -94,13 +93,12 @@ EOF
     if [[ $elapsed -ge $max_wait ]]; then
         log_error "Test pod did not become running within ${max_wait} seconds"
         kubectl describe pod test-pod-policy-pod
-        kubectl delete pod test-pod-policy-pod --ignore-not-found=true
         exit 1
     fi
     
-    # Clean up test pod
-    log_info "Test successful! Cleaning up test pod..."
-    kubectl delete pod test-pod-policy-pod --ignore-not-found=true
+    # Don't clean up test pod so it can be inspected after the test
+    log_info "Test successful! Pod 'test-pod-policy-pod' is left running for inspection."
+    log_info "To clean up manually, run: kubectl delete pod test-pod-policy-pod"
     log_info "Sample pod test completed successfully"
 }
 
