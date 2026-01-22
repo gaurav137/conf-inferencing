@@ -28,7 +28,7 @@ Thumbs.db
 
 # Vendor directory (if not committing)
 # vendor/
-
+generated/
 tmp/
 dist/kubelet-proxy-linux-amd64.tar.gz
 dist/kubelet-proxy-linux-amd64.tar.gz.sha256
