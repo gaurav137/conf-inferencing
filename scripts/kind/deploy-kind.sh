@@ -139,45 +139,35 @@ deploy_to_node() {
     
     local staging_dir="/opt/kubelet-proxy-staging"
     
-    # Get host IP that is accessible from kind node (IPv4 only)
-    local host_ip
-    host_ip=$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-    if [ -z "$host_ip" ]; then
-        host_ip="172.17.0.1"
-    fi
-    local signing_cert_url="https://${host_ip}:${SIGNING_SERVER_PORT}/signingcert"
-    
     # Create staging directory on node
     docker exec "$WORKER_NODE_NAME" mkdir -p "$staging_dir"
     
-    # Download TLS certificate from signing-server for CA verification
-    log_info "Downloading TLS certificate from signing-server..."
-    local tls_cert_file="$PROJECT_ROOT/tmp/signing-server-tls.crt"
-    curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/tlscert" -o "$tls_cert_file" || {
-        log_error "Failed to download TLS certificate from signing-server"
+    # Download signing certificate from signing-server
+    log_info "Downloading signing certificate from signing-server..."
+    local signing_cert_file="$PROJECT_ROOT/tmp/signing-cert.pem"
+    curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/signingcert" -o "$signing_cert_file" || {
+        log_error "Failed to download signing certificate from signing-server"
         exit 1
     }
-    log_info "TLS certificate downloaded to $tls_cert_file"
+    log_info "Signing certificate downloaded to $signing_cert_file"
     
     # Copy files to worker node
     log_info "Copying files to worker node..."
     
-    # Copy local binary, install script, and TLS cert
+    # Copy local binary, install script, and signing cert
     docker cp "$PROJECT_ROOT/bin/kubelet-proxy-linux-amd64" "$WORKER_NODE_NAME:$staging_dir/kubelet-proxy"
     docker cp "$PROJECT_ROOT/scripts/install.sh" "$WORKER_NODE_NAME:$staging_dir/install.sh"
-    docker cp "$tls_cert_file" "$WORKER_NODE_NAME:$staging_dir/signing-server-tls.crt"
+    docker cp "$signing_cert_file" "$WORKER_NODE_NAME:$staging_dir/signing-cert.pem"
     
     # Verify files were copied
     log_info "Verifying files on node..."
     docker exec "$WORKER_NODE_NAME" ls -la "$staging_dir/"
     
-    # Run install.sh with local binary, signing cert URL, and TLS CA cert
+    # Run install.sh with local binary and signing cert file
     log_info "Running install.sh on worker node..."
-    log_info "Signing cert URL: $signing_cert_url"
     docker exec "$WORKER_NODE_NAME" bash "$staging_dir/install.sh" \
         --local-binary "$staging_dir/kubelet-proxy" \
-        --signing-cert-url "$signing_cert_url" \
-        --signing-cert-url-ca-cert "$staging_dir/signing-server-tls.crt" \
+        --signing-cert-file "$staging_dir/signing-cert.pem" \
         --proxy-listen-addr "$PROXY_LISTEN_ADDR"
 }
 
