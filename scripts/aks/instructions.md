@@ -82,8 +82,15 @@ Instructions to generate deploy-aks.sh
 - Add a taint "pod-policy=required:NoSchedule" on the above node to indicate only pods with a pod policy can be scheduled on it.
 - Add a node selector label on the above node to help pods pick nodes that require pod policy.
 
+Instructions to generate deploy-kubelet-proxy.sh
+  - Assume a setup was created previously using deploy-aks.sh.
+  - Deploy the signing-server as a local docker container with TLS.
+  - Run scripts/install.sh script in the Azure VM via ssh using the --signing-cert-file and --local-binary options.
 
 Instructions to generate test-pod-policies.sh
-- Assume a setup was created previously using deploy-aks.sh.
-- Create a sample pod with the toleration and node selector that was set on the VM node and test that the pod gets scheduled on the Azure VM node and runs successfully.
+- Assume a setup was created previously using deploy-aks.sh and deploy-kubelet-proxy.sh.
+- Generate a sample pod yaml that conforms to the nginx-pod-policy.json file present under pod-policies.
+  - The sample pod should have the toleration and node selector that was set on the VM node.
+- Using the signing-server to sign the nginx-pod-policy.json and have the policy and signature applied as annotations on the pod.
+- Apply the pod yaml on the cluster and test that the pod gets scheduled on the Azure VM node and runs successfully
 - Don't cleanup the sample pod so that it can be inspected after the test finishes.
