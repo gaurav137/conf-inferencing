@@ -92,6 +92,8 @@ func run() int {
 	fmt.Printf("  API Server: %s\n", cfg.LoadedKubeConfig.Server)
 	fmt.Printf("  TLS: %v\n", cfg.TLSCertFile != "")
 	fmt.Printf("  Pod Policy Verification: %v\n", cfg.PolicyVerificationCert != "")
+	fmt.Printf("  Log Requests: %v\n", cfg.LogRequests)
+	fmt.Printf("  Log Pod Payloads: %v\n", cfg.LogPodPayloads)
 
 	if err := proxy.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running proxy: %v\n", err)

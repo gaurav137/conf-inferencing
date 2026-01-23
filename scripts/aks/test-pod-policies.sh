@@ -53,19 +53,25 @@ sign_pod_policy() {
     
     log_info "Using pod policy: $policy_file"
     
-    # Sign the policy
+    # Read the policy file and base64 encode it
+    local policy_content
+    policy_content=$(cat "$policy_file")
+    
+    # Base64 encode the policy for use in pod annotations
+    POLICY_BASE64=$(echo -n "$policy_content" | base64 -w 0)
+    
+    # Sign the base64 encoded policy (same as kind/test-pod-policies.sh)
+    # The signing server expects: {"payload": "<string to sign>"}
     local response
-    response=$(curl -sf --insecure -X POST \
+    response=$(curl -sf --insecure -X POST "$SIGNING_SERVER_URL/sign" \
         -H "Content-Type: application/json" \
-        -d @"$policy_file" \
-        "$SIGNING_SERVER_URL/sign") || {
+        -d "{\"payload\": $(printf '%s' "$POLICY_BASE64" | jq -Rs .)}") || {
         log_error "Failed to sign pod policy"
         exit 1
     }
     
     # Extract signature from response
     POLICY_SIGNATURE=$(echo "$response" | jq -r '.signature')
-    POLICY_BASE64=$(echo "$response" | jq -r '.policy')
     
     if [[ -z "$POLICY_SIGNATURE" || "$POLICY_SIGNATURE" == "null" ]]; then
         log_error "Failed to get signature from signing server response"

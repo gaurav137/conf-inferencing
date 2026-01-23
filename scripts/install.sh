@@ -697,7 +697,7 @@ configure_kubelet_aks_flex() {
     # Create drop-in to override kubeconfig path
     cat > "$KUBELET_DROPIN_FILE" <<EOF
 [Service]
-Environment="KUBELET_KUBECONFIG_ARGS=--kubeconfig=$PROXY_KUBECONFIG"
+Environment=KUBELET_TLS_BOOTSTRAP_FLAGS="--kubeconfig $PROXY_KUBECONFIG"
 EOF
 
     log_info "Kubelet drop-in created at $KUBELET_DROPIN_FILE"

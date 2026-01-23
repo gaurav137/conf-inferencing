@@ -85,6 +85,7 @@ Instructions to generate deploy-aks.sh
 Instructions to generate deploy-kubelet-proxy.sh
   - Assume a setup was created previously using deploy-aks.sh.
   - Deploy the signing-server as a local docker container with TLS.
+  - Run scripts/unintall.sh script to cleanup any previous install.
   - Run scripts/install.sh script in the Azure VM via ssh using the --signing-cert-file and --local-binary options.
 
 Instructions to generate test-pod-policies.sh

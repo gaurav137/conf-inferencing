@@ -186,6 +186,12 @@ deploy_to_vm() {
         exit 1
     }
     
+    # Copy uninstall.sh script
+    scp $ssh_opts "$PROJECT_ROOT/scripts/uninstall.sh" azureuser@$VM_PUBLIC_IP:$staging_dir/uninstall.sh || {
+        log_error "Failed to copy uninstall.sh to VM"
+        exit 1
+    }
+    
     # Copy signing certificate
     scp $ssh_opts "$SIGNING_CERT_FILE" azureuser@$VM_PUBLIC_IP:$staging_dir/signing-cert.pem || {
         log_error "Failed to copy signing certificate to VM"
@@ -195,6 +201,12 @@ deploy_to_vm() {
     # Verify files were copied
     log_info "Verifying files on VM..."
     ssh $ssh_opts azureuser@$VM_PUBLIC_IP "ls -la $staging_dir/"
+    
+    # Run uninstall.sh to cleanup any previous install
+    log_info "Running uninstall.sh on VM to cleanup any previous install..."
+    ssh $ssh_opts azureuser@$VM_PUBLIC_IP "sudo bash $staging_dir/uninstall.sh" || {
+        log_warn "uninstall.sh returned non-zero (may be first install)"
+    }
     
     # Run install.sh on VM with --signing-cert-file and --local-binary options
     log_info "Running install.sh on VM..."
