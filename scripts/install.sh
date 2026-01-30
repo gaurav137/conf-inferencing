@@ -19,7 +19,7 @@
 #   --version VERSION         Kubelet-proxy version to install (default: latest)
 #   --signing-cert-file FILE  Path to local signing certificate file (instead of URL)
 #   --signing-cert-url-ca-cert FILE  CA certificate for verifying signing cert URL (for curl --cacert)
-#   --github-repo REPO        GitHub repository (default: gaurav137/conf-inferencing)
+#   --github-repo REPO        GitHub repository (default: gaurav137/conf-node)
 #   --proxy-listen-addr ADDR  Proxy listen address (default: 127.0.0.1:6444)
 #   --skip-kubelet-restart    Don't restart kubelet after installation
 #   --help                    Show this help message
@@ -28,7 +28,7 @@
 #   {
 #     "signingCertUrl": "https://signing-server.example.com/signingcert",
 #     "version": "v1.0.0",
-#     "githubRepo": "gaurav137/conf-inferencing",
+#     "githubRepo": "gaurav137/conf-node",
 #     "proxyListenAddr": "127.0.0.1:6444",
 #     "skipKubeletRestart": false
 #   }
@@ -55,7 +55,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 
 # Default configuration
-GITHUB_REPO="gaurav137/conf-inferencing"
+GITHUB_REPO="gaurav137/conf-node"
 VERSION=""  # Will be determined from GitHub releases if not specified
 PROXY_LISTEN_ADDR="127.0.0.1:6444"
 PROXY_CERT_DIR="/etc/kubelet-proxy"
@@ -238,7 +238,7 @@ load_config() {
         [[ -n "$val" ]] && VERSION="$val"
     fi
 
-    if [[ "$GITHUB_REPO" == "gaurav137/conf-inferencing" ]]; then
+    if [[ "$GITHUB_REPO" == "gaurav137/conf-node" ]]; then
         val=$(jq -r '.githubRepo // empty' "$CONFIG_FILE")
         [[ -n "$val" ]] && GITHUB_REPO="$val"
     fi

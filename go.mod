@@ -1,4 +1,4 @@
-module github.com/gaurav137/conf-inferencing
+module github.com/gaurav137/conf-node
 
 go 1.21
 

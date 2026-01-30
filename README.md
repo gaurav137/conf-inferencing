@@ -1,4 +1,4 @@
-# conf-inferencing
+# conf-node
 
 A collection of Go binaries for confidential inferencing on [AKS Flex Node](https://github.com/gaurav137/AKSFlexNode).
 
@@ -15,7 +15,7 @@ cat > kubelet-proxy-config.json <<EOF
 EOF
 
 # Download and run the installer
-curl -fsSL https://raw.githubusercontent.com/gaurav137/conf-inferencing/main/scripts/install.sh | sudo bash -s -- --config kubelet-proxy-config.json
+curl -fsSL https://raw.githubusercontent.com/gaurav137/conf-node/main/scripts/install.sh | sudo bash -s -- --config kubelet-proxy-config.json
 ```
 
 ### Configuration Options
@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/gaurav137/conf-inferencing/main/scr
 | `signingCertFile` | Path to local signing certificate file (alternative to URL) |
 | `localBinary` | Path to local kubelet-proxy binary (skips GitHub download, for testing) |
 | `version` | Kubelet-proxy version to install (default: latest from GitHub releases) |
-| `githubRepo` | GitHub repository (default: gaurav137/conf-inferencing) |
+| `githubRepo` | GitHub repository (default: gaurav137/conf-node) |
 | `proxyListenAddr` | Proxy listen address (default: 127.0.0.1:6444) |
 | `skipKubeletRestart` | Don't restart kubelet after installation (default: false) |
 

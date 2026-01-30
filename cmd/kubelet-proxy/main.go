@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/gaurav137/conf-inferencing/internal/kubeletproxy"
-	"github.com/gaurav137/conf-inferencing/internal/kubeletproxy/admission"
+	"github.com/gaurav137/conf-node/internal/kubeletproxy"
+	"github.com/gaurav137/conf-node/internal/kubeletproxy/admission"
 )
 
 func main() {

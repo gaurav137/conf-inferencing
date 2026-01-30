@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gaurav137/conf-inferencing/internal/kubeletproxy/admission"
+	"github.com/gaurav137/conf-node/internal/kubeletproxy/admission"
 )
 
 // Proxy intercepts traffic between kubelet and API server.

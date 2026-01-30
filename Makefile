@@ -1,5 +1,5 @@
 # Project variables
-PROJECT_NAME := conf-inferencing
+PROJECT_NAME := conf-node
 GO := go
 GOFLAGS := -v
 BUILD_DIR := bin
