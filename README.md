@@ -1,6 +1,6 @@
-# conf-node
+# Confidential Nodes
 
-A collection of Go binaries for confidential inferencing on [AKS Flex Node](https://github.com/gaurav137/AKSFlexNode).
+A collection of Go binaries for enabling confidential nodes on [AKS Flex Node](https://github.com/gaurav137/AKSFlexNode).
 
 ## Installation on VM Nodes
 
