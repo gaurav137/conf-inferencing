@@ -32,6 +32,7 @@ On Azure CVMs, the HCL (Host Compatibility Layer) firmware owns the interface to
 | NV Index | Name | Contents |
 |----------|------|----------|
 | `0x01400001` | `HCL_REPORT_INDEX` | SNP attestation report (32-byte header + 1184-byte report) |
+| `0x01400002` | `REPORT_DATA_INDEX` | Report data trigger — write 64 bytes here to regenerate SNP report |
 | `0x01C101D0` | `AIK_CERT_INDEX` | AIK certificate (x.509 DER) |
 | `0x81000003` | `AIK_PUB_INDEX` | AIK public key (persistent handle) |
 | `0x81010001` | `EK_PUB_INDEX` | EK public key (persistent handle) |
@@ -47,6 +48,32 @@ On Azure CVMs:
 - **You cannot bind dynamic data** (like a TPM quote hash) into the SNP `report_data` field
 
 The attestation binding works differently: the SNP report measures the HCL/vTPM firmware, and the TPM Quote (signed by the AIK) provides the runtime measurement chain. A verifier checks both independently.
+
+### Fresh SNP Report Generation (NV Index 0x01400002)
+
+By default, the HCL firmware generates the SNP report at boot with `report_data = SHA256(var_data)` where `var_data` contains the AK public key JWK. This boot-time report cannot bind caller-chosen data.
+
+To get a fresh SNP report with custom `report_data`:
+
+1. Write 64 bytes to NV index `0x01400002`
+2. Wait ~3 seconds for HCL firmware to regenerate the report
+3. Read the fresh report from `0x01400001`
+
+This creates a direct cryptographic binding between the caller's data and the hardware attestation, going beyond the TPM Quote binding.
+
+**CLI:** Use the `-fresh` flag to trigger this flow (uses `SHA256(nonce)` as report_data):
+```bash
+./attestation-cli -fresh
+```
+
+**Server:** Send a POST request with a JSON body containing base64-encoded 64-byte `reportData`:
+```bash
+curl -X POST http://localhost:8900/attest \
+  -H "Content-Type: application/json" \
+  -d '{"reportData":"<base64-encoded-64-bytes>"}'
+```
+
+This pattern comes from [az-snp-vtpm](https://github.com/kinvolk/azure-cvm-tooling) which uses the same NV index trigger mechanism.
 
 ### PCR Selection
 
@@ -152,6 +179,66 @@ The SKR flow demonstrates how secrets can be securely released from Azure Key Va
     }
   ]
 }
+```
+
+## Attestation Server REST API
+
+The attestation server exposes a single endpoint on port 8900 (configurable via `-addr`).
+
+### `POST /attest`
+
+Collects attestation evidence with a fresh SNP report bound to the provided report data.
+
+**Request:**
+
+```json
+{
+  "reportData": "<base64-encoded 64-byte report_data>"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `reportData` | string | Yes | Base64-encoded 64 bytes written to NV index `0x01400002` to trigger fresh SNP report generation. Also used as the TPM Quote nonce. |
+
+**Response:**
+
+```json
+{
+  "tpmQuote": "<base64>",
+  "hclReport": "<base64>",
+  "snpReport": "<base64>",
+  "aikCert": "<base64>",
+  "runtimeClaims": {
+    "keys": [ ... ],
+    "vm-configuration": {
+      "console-enabled": true,
+      "secure-boot": true,
+      "tpm-enabled": true,
+      "tpm-persisted": true,
+      "vmUniqueId": "..."
+    },
+    "user-data": "..."
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tpmQuote` | string | Base64-encoded TPM Quote (TPMS_ATTEST + TPMT_SIGNATURE) |
+| `hclReport` | string | Base64-encoded full HCL report blob from NVRAM |
+| `snpReport` | string | Base64-encoded 1184-byte AMD SNP attestation report |
+| `aikCert` | string | Base64-encoded AIK x.509 certificate (DER) |
+| `runtimeClaims` | object | Parsed JSON runtime claims from the HCL report (keys, VM config, user-data) |
+
+**Example:**
+
+```bash
+# Generate 64 random bytes, base64-encode, and request attestation
+REPORT_DATA=$(openssl rand 64 | base64 -w0)
+curl -X POST http://localhost:8900/attest \
+  -H "Content-Type: application/json" \
+  -d "{\"reportData\":\"$REPORT_DATA\"}"
 ```
 
 ## Reference

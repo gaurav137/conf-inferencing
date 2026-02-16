@@ -11,12 +11,18 @@ import (
 	"github.com/gaurav137/conf-node/pkg/attestation"
 )
 
+// AttestRequest is the JSON body expected by the /attest endpoint.
+type AttestRequest struct {
+	ReportData string `json:"reportData"` // base64-encoded 64-byte report_data for SNP report
+}
+
 // AttestResponse is the JSON response returned by the /attest endpoint.
 type AttestResponse struct {
-	TPMQuote  string `json:"tpmQuote"`  // base64-encoded TPM quote (quoted + signature)
-	HCLReport string `json:"hclReport"` // base64-encoded HCL report blob
-	SNPReport string `json:"snpReport"` // base64-encoded AMD SNP attestation report
-	AIKCert   string `json:"aikCert"`   // base64-encoded AIK x.509 certificate (DER)
+	TPMQuote      string                     `json:"tpmQuote"`                // base64-encoded TPM quote (quoted + signature)
+	HCLReport     string                     `json:"hclReport"`               // base64-encoded HCL report blob
+	SNPReport     string                     `json:"snpReport"`               // base64-encoded AMD SNP attestation report
+	AIKCert       string                     `json:"aikCert"`                 // base64-encoded AIK x.509 certificate (DER)
+	RuntimeClaims *attestation.RuntimeClaims `json:"runtimeClaims,omitempty"` // parsed runtime claims from HCL report
 }
 
 func main() {
@@ -30,23 +36,35 @@ func main() {
 }
 
 func attestHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed, use POST", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Use a default nonce; callers can supply one via ?nonce=<base64> query param.
-	nonce := []byte("external-verifier-nonce")
-	if q := r.URL.Query().Get("nonce"); q != "" {
-		decoded, err := base64.StdEncoding.DecodeString(q)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid base64 nonce: %v", err), http.StatusBadRequest)
-			return
-		}
-		nonce = decoded
+	var req AttestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid JSON body: %v", err), http.StatusBadRequest)
+		return
 	}
 
-	evidence, err := attestation.CollectEvidence(nonce)
+	if req.ReportData == "" {
+		http.Error(w, "reportData is required", http.StatusBadRequest)
+		return
+	}
+
+	rdBytes, err := base64.StdEncoding.DecodeString(req.ReportData)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid base64 reportData: %v", err), http.StatusBadRequest)
+		return
+	}
+	if len(rdBytes) != attestation.ReportDataSize {
+		http.Error(w, fmt.Sprintf("reportData must be exactly %d bytes, got %d",
+			attestation.ReportDataSize, len(rdBytes)), http.StatusBadRequest)
+		return
+	}
+
+	nonce := rdBytes // use reportData as the TPM quote nonce
+	evidence, err := attestation.CollectEvidenceWithReportData(nonce, rdBytes)
 	if err != nil {
 		log.Printf("attestation failed: %v", err)
 		http.Error(w, fmt.Sprintf("attestation failed: %v", err), http.StatusInternalServerError)
@@ -54,9 +72,10 @@ func attestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := AttestResponse{
-		TPMQuote:  base64.StdEncoding.EncodeToString(evidence.TPMQuote),
-		HCLReport: base64.StdEncoding.EncodeToString(evidence.HCLReport),
-		SNPReport: base64.StdEncoding.EncodeToString(evidence.SNPReport),
+		TPMQuote:      base64.StdEncoding.EncodeToString(evidence.TPMQuote),
+		HCLReport:     base64.StdEncoding.EncodeToString(evidence.HCLReport),
+		SNPReport:     base64.StdEncoding.EncodeToString(evidence.SNPReport),
+		RuntimeClaims: evidence.RuntimeClaims,
 	}
 	if evidence.AIKCert != nil {
 		resp.AIKCert = base64.StdEncoding.EncodeToString(evidence.AIKCert)

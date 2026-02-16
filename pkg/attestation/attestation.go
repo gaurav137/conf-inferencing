@@ -6,8 +6,11 @@ package attestation
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
@@ -33,15 +36,60 @@ const (
 
 	// SNPReportSize is the size of the raw AMD SNP attestation report.
 	SNPReportSize = 1184
+
+	// ReportDataNVIndex is the NV index used to trigger SNP report regeneration
+	// with custom report_data on Azure CVMs. Writing 64 bytes here causes the
+	// HCL firmware to generate a fresh SNP report at HCLReportNVIndex.
+	ReportDataNVIndex = 0x01400002
+
+	// ReportDataSize is the size of the report_data field in an SNP report.
+	ReportDataSize = 64
+
+	// ReportDataRefreshDelay is the time to wait after writing report_data
+	// for the HCL firmware to regenerate the SNP report.
+	ReportDataRefreshDelay = 3 * time.Second
 )
+
+// RuntimeClaims represents the JSON runtime claims embedded in the HCL report's
+// Runtime Data section. These claims are endorsed by the hardware report via
+// the report_data hash binding.
+// See: https://learn.microsoft.com/en-us/azure/confidential-computing/guest-attestation-confidential-virtual-machines-design
+type RuntimeClaims struct {
+	Keys            []json.RawMessage `json:"keys"`             // JWK keys (HCLAkPub, HCLEkPub)
+	VMConfiguration *VMConfiguration  `json:"vm-configuration"` // Azure CVM configuration
+	UserData        string            `json:"user-data"`        // 64-byte hex string from NV 0x01400002
+}
+
+// VMConfiguration holds selective Azure CVM configuration from the runtime claims.
+type VMConfiguration struct {
+	RootCertThumbprint string `json:"root-cert-thumbprint"`
+	ConsoleEnabled     bool   `json:"console-enabled"`
+	SecureBoot         bool   `json:"secure-boot"`
+	TPMEnabled         bool   `json:"tpm-enabled"`
+	TPMPersisted       bool   `json:"tpm-persisted"`
+	VMUniqueID         string `json:"vmUniqueId"`
+}
+
+// runtimeDataHeader is the binary header of the Runtime Data section in the HCL report.
+// It immediately follows the SNP report payload (offset 1216 from start of HCL blob).
+type runtimeDataHeader struct {
+	DataSize   uint32
+	Version    uint32
+	ReportType uint32
+	HashType   uint32
+	ClaimSize  uint32
+}
+
+const runtimeDataHeaderSize = 20 // 5 x uint32
 
 // Evidence holds the collected attestation artifacts from an Azure CVM.
 type Evidence struct {
-	TPMQuote  []byte // Marshalled TPM quote (quoted + signature)
-	QuoteHash [32]byte
-	HCLReport []byte // Full HCL report blob from NVRAM
-	SNPReport []byte // Raw AMD SNP report extracted from HCL report
-	AIKCert   []byte // AIK x.509 certificate (DER), may be nil
+	TPMQuote      []byte // Marshalled TPM quote (quoted + signature)
+	QuoteHash     [32]byte
+	HCLReport     []byte         // Full HCL report blob from NVRAM
+	SNPReport     []byte         // Raw AMD SNP report extracted from HCL report
+	AIKCert       []byte         // AIK x.509 certificate (DER), may be nil
+	RuntimeClaims *RuntimeClaims // Parsed runtime claims from HCL report, may be nil
 }
 
 // CollectEvidence opens the TPM, reads the Azure-provisioned AIK, generates
@@ -54,6 +102,36 @@ func CollectEvidence(nonce []byte) (*Evidence, error) {
 		return nil, fmt.Errorf("open TPM: %w", err)
 	}
 	defer tpmDev.Close()
+
+	return collectEvidenceFromTPM(tpmDev, nonce)
+}
+
+// CollectEvidenceWithReportData is like CollectEvidence but writes custom
+// report_data to NV index 0x01400002 to trigger fresh SNP report generation.
+// The reportData must be exactly 64 bytes. The resulting SNP report will have
+// the provided reportData bound into its report_data field, creating a direct
+// cryptographic binding between the caller's data and the hardware attestation.
+// This follows the pattern from az-snp-vtpm: write to 0x01400002, wait for
+// HCL firmware regeneration, then read the fresh report from 0x01400001.
+func CollectEvidenceWithReportData(nonce []byte, reportData []byte) (*Evidence, error) {
+	if len(reportData) != ReportDataSize {
+		return nil, fmt.Errorf("reportData must be exactly %d bytes, got %d", ReportDataSize, len(reportData))
+	}
+
+	tpmDev, err := linuxtpm.Open(TPMDevice)
+	if err != nil {
+		return nil, fmt.Errorf("open TPM: %w", err)
+	}
+	defer tpmDev.Close()
+
+	// Write report_data to trigger fresh SNP report generation
+	if err := NVWriteData(tpmDev, tpm2.TPMHandle(ReportDataNVIndex), reportData); err != nil {
+		return nil, fmt.Errorf("write report_data to 0x%08x: %w", ReportDataNVIndex, err)
+	}
+
+	// Wait for HCL firmware to regenerate the SNP report
+	log.Printf("Waiting %v for HCL firmware to regenerate SNP report...", ReportDataRefreshDelay)
+	time.Sleep(ReportDataRefreshDelay)
 
 	return collectEvidenceFromTPM(tpmDev, nonce)
 }
@@ -128,12 +206,30 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) 
 	snpReport := hclBlob[HCLReportHeaderSize : HCLReportHeaderSize+SNPReportSize]
 	log.Printf("SNP report extracted: %d bytes", len(snpReport))
 
+	// 7. Parse runtime claims from HCL report
+	var runtimeClaims *RuntimeClaims
+	rc, err := ParseRuntimeClaims(hclBlob)
+	if err != nil {
+		log.Printf("Warning: could not parse runtime claims: %v", err)
+	} else {
+		runtimeClaims = rc
+		log.Printf("Runtime claims parsed: %d keys, user-data length=%d",
+			len(runtimeClaims.Keys), len(runtimeClaims.UserData))
+		if runtimeClaims.VMConfiguration != nil {
+			log.Printf("VM config: secure-boot=%v, tpm-enabled=%v, vmUniqueId=%s",
+				runtimeClaims.VMConfiguration.SecureBoot,
+				runtimeClaims.VMConfiguration.TPMEnabled,
+				runtimeClaims.VMConfiguration.VMUniqueID)
+		}
+	}
+
 	return &Evidence{
-		TPMQuote:  quoteBlob.Bytes(),
-		QuoteHash: quoteHash,
-		HCLReport: hclBlob,
-		SNPReport: snpReport,
-		AIKCert:   aikCert,
+		TPMQuote:      quoteBlob.Bytes(),
+		QuoteHash:     quoteHash,
+		HCLReport:     hclBlob,
+		SNPReport:     snpReport,
+		AIKCert:       aikCert,
+		RuntimeClaims: runtimeClaims,
 	}, nil
 }
 
@@ -155,6 +251,59 @@ func ReadPersistentHandle(tpm transport.TPM, handle tpm2.TPMHandle) (tpm2.TPM2BN
 // Equivalent to: tpm2_nvread -C o 0x01400001
 func GetHCLReport(tpm transport.TPM) ([]byte, error) {
 	return NVRead(tpm, tpm2.TPMHandle(HCLReportNVIndex))
+}
+
+// GetHCLReportWithReportData writes custom report_data to the trigger NV index
+// (0x01400002), waits for the HCL firmware to regenerate the SNP report, and
+// reads the fresh HCL report from 0x01400001.
+func GetHCLReportWithReportData(tpm transport.TPM, reportData []byte) ([]byte, error) {
+	if len(reportData) != ReportDataSize {
+		return nil, fmt.Errorf("reportData must be exactly %d bytes, got %d", ReportDataSize, len(reportData))
+	}
+
+	if err := NVWriteData(tpm, tpm2.TPMHandle(ReportDataNVIndex), reportData); err != nil {
+		return nil, fmt.Errorf("write report_data: %w", err)
+	}
+
+	log.Printf("Waiting %v for HCL firmware to regenerate SNP report...", ReportDataRefreshDelay)
+	time.Sleep(ReportDataRefreshDelay)
+
+	return GetHCLReport(tpm)
+}
+
+// ParseRuntimeClaims extracts and parses the JSON runtime claims from an HCL
+// report blob. The runtime data starts at offset HCLReportHeaderSize + SNPReportSize
+// (1216) and contains a 20-byte header followed by the JSON claims.
+func ParseRuntimeClaims(hclBlob []byte) (*RuntimeClaims, error) {
+	runtimeDataOffset := HCLReportHeaderSize + SNPReportSize
+	if len(hclBlob) < runtimeDataOffset+runtimeDataHeaderSize {
+		return nil, fmt.Errorf("HCL blob too small for runtime data header: %d bytes", len(hclBlob))
+	}
+
+	// Parse the runtime data header
+	var hdr runtimeDataHeader
+	reader := bytes.NewReader(hclBlob[runtimeDataOffset : runtimeDataOffset+runtimeDataHeaderSize])
+	if err := binary.Read(reader, binary.LittleEndian, &hdr); err != nil {
+		return nil, fmt.Errorf("read runtime data header: %w", err)
+	}
+
+	log.Printf("Runtime data: version=%d, reportType=%d, hashType=%d, claimSize=%d",
+		hdr.Version, hdr.ReportType, hdr.HashType, hdr.ClaimSize)
+
+	claimsStart := runtimeDataOffset + runtimeDataHeaderSize
+	claimsEnd := claimsStart + int(hdr.ClaimSize)
+	if claimsEnd > len(hclBlob) {
+		return nil, fmt.Errorf("runtime claims exceed HCL blob: need %d, have %d", claimsEnd, len(hclBlob))
+	}
+
+	claimsJSON := hclBlob[claimsStart:claimsEnd]
+
+	var claims RuntimeClaims
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		return nil, fmt.Errorf("unmarshal runtime claims JSON: %w", err)
+	}
+
+	return &claims, nil
 }
 
 // NVRead reads the full contents of any NV index in chunks (TPM max NV buffer
@@ -207,4 +356,96 @@ func NVRead(tpm transport.TPM, nvIndex tpm2.TPMHandle) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// NVWriteData writes data to a TPM NV index, creating or resizing the NV space
+// as needed. This handles the full lifecycle: check existence, undefine if wrong
+// size, define if needed, then write. Matches the write_nv_index pattern from
+// az-snp-vtpm (kinvolk/azure-cvm-tooling).
+func NVWriteData(tpm transport.TPM, nvIndex tpm2.TPMHandle, data []byte) error {
+	needsDefine := false
+
+	// Check if NV index already exists
+	nvPubRsp, err := tpm2.NVReadPublic{
+		NVIndex: nvIndex,
+	}.Execute(tpm)
+	if err != nil {
+		// NV index doesn't exist — need to define it
+		needsDefine = true
+	} else {
+		nvPublic, err := nvPubRsp.NVPublic.Contents()
+		if err != nil {
+			needsDefine = true
+		} else if int(nvPublic.DataSize) != len(data) {
+			// Size mismatch — undefine and redefine
+			log.Printf("NV index 0x%08x exists with size %d, need %d — redefining",
+				nvIndex, nvPublic.DataSize, len(data))
+			_, undefErr := tpm2.NVUndefineSpace{
+				AuthHandle: tpm2.AuthHandle{
+					Handle: tpm2.TPMRHOwner,
+					Auth:   tpm2.PasswordAuth(nil),
+				},
+				NVIndex: tpm2.NamedHandle{
+					Handle: nvIndex,
+					Name:   nvPubRsp.NVName,
+				},
+			}.Execute(tpm)
+			if undefErr != nil {
+				return fmt.Errorf("NVUndefineSpace(0x%08x): %w", nvIndex, undefErr)
+			}
+			needsDefine = true
+		}
+	}
+
+	if needsDefine {
+		log.Printf("Defining NV index 0x%08x with size %d", nvIndex, len(data))
+		_, err := tpm2.NVDefineSpace{
+			AuthHandle: tpm2.AuthHandle{
+				Handle: tpm2.TPMRHOwner,
+				Auth:   tpm2.PasswordAuth(nil),
+			},
+			PublicInfo: tpm2.New2B(tpm2.TPMSNVPublic{
+				NVIndex: nvIndex,
+				NameAlg: tpm2.TPMAlgSHA256,
+				Attributes: tpm2.TPMANV{
+					OwnerWrite: true,
+					OwnerRead:  true,
+				},
+				DataSize: uint16(len(data)),
+			}),
+		}.Execute(tpm)
+		if err != nil {
+			return fmt.Errorf("NVDefineSpace(0x%08x): %w", nvIndex, err)
+		}
+	}
+
+	// Re-read NV public to get the current name for the write command
+	nvPubRsp, err = tpm2.NVReadPublic{
+		NVIndex: nvIndex,
+	}.Execute(tpm)
+	if err != nil {
+		return fmt.Errorf("NVReadPublic after define: %w", err)
+	}
+
+	// Write data to NV index
+	_, err = tpm2.NVWrite{
+		AuthHandle: tpm2.AuthHandle{
+			Handle: tpm2.TPMRHOwner,
+			Auth:   tpm2.PasswordAuth(nil),
+		},
+		NVIndex: tpm2.NamedHandle{
+			Handle: nvIndex,
+			Name:   nvPubRsp.NVName,
+		},
+		Data: tpm2.TPM2BMaxNVBuffer{
+			Buffer: data,
+		},
+		Offset: 0,
+	}.Execute(tpm)
+	if err != nil {
+		return fmt.Errorf("NVWrite(0x%08x): %w", nvIndex, err)
+	}
+
+	log.Printf("Wrote %d bytes to NV index 0x%08x", len(data), nvIndex)
+	return nil
 }
