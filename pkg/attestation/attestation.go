@@ -82,6 +82,32 @@ type runtimeDataHeader struct {
 
 const runtimeDataHeaderSize = 20 // 5 x uint32
 
+// AllPCRs is the default set of PCR slots (0-23), matching azure-cvm-tooling.
+var AllPCRs = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
+
+// PCRValues maps PCR indices to their SHA256 digest values.
+type PCRValues map[int][]byte
+
+// BuildPCRSelection creates a TPMLPCRSelection for the given PCR indices.
+// If pcrSlots is nil or empty, all 24 PCRs are selected.
+func BuildPCRSelection(pcrSlots []int) tpm2.TPMLPCRSelection {
+	if len(pcrSlots) == 0 {
+		pcrSlots = AllPCRs
+	}
+	uints := make([]uint, len(pcrSlots))
+	for i, s := range pcrSlots {
+		uints[i] = uint(s)
+	}
+	return tpm2.TPMLPCRSelection{
+		PCRSelections: []tpm2.TPMSPCRSelection{
+			{
+				Hash:      tpm2.TPMAlgSHA256,
+				PCRSelect: tpm2.PCClientCompatible.PCRs(uints...),
+			},
+		},
+	}
+}
+
 // Evidence holds the collected attestation artifacts from an Azure CVM.
 type Evidence struct {
 	TPMQuote      []byte // Marshalled TPM quote (quoted + signature)
@@ -89,13 +115,15 @@ type Evidence struct {
 	HCLReport     []byte         // Full HCL report blob from NVRAM
 	SNPReport     []byte         // Raw AMD SNP report extracted from HCL report
 	AIKCert       []byte         // AIK x.509 certificate (DER), may be nil
+	PCRs          PCRValues      // SHA256 PCR values (0-23)
 	RuntimeClaims *RuntimeClaims // Parsed runtime claims from HCL report, may be nil
 }
 
 // CollectEvidence opens the TPM, reads the Azure-provisioned AIK, generates
-// a TPM Quote over PCRs 0-7 using the given nonce, and retrieves the HCL/SNP
-// report from vTPM NVRAM.
-func CollectEvidence(nonce []byte) (*Evidence, error) {
+// a TPM Quote over the specified PCRs using the given nonce, and retrieves
+// the HCL/SNP report from vTPM NVRAM.
+// If pcrSlots is nil, all 24 PCRs (0-23) are included.
+func CollectEvidence(nonce []byte, pcrSlots []int) (*Evidence, error) {
 	// 1. Open TPM
 	tpmDev, err := linuxtpm.Open(TPMDevice)
 	if err != nil {
@@ -103,7 +131,7 @@ func CollectEvidence(nonce []byte) (*Evidence, error) {
 	}
 	defer tpmDev.Close()
 
-	return collectEvidenceFromTPM(tpmDev, nonce)
+	return collectEvidenceFromTPM(tpmDev, nonce, pcrSlots)
 }
 
 // CollectEvidenceWithReportData is like CollectEvidence but writes custom
@@ -113,7 +141,8 @@ func CollectEvidence(nonce []byte) (*Evidence, error) {
 // cryptographic binding between the caller's data and the hardware attestation.
 // This follows the pattern from az-snp-vtpm: write to 0x01400002, wait for
 // HCL firmware regeneration, then read the fresh report from 0x01400001.
-func CollectEvidenceWithReportData(nonce []byte, reportData []byte) (*Evidence, error) {
+// If pcrSlots is nil, all 24 PCRs (0-23) are included.
+func CollectEvidenceWithReportData(nonce []byte, reportData []byte, pcrSlots []int) (*Evidence, error) {
 	if len(reportData) != ReportDataSize {
 		return nil, fmt.Errorf("reportData must be exactly %d bytes, got %d", ReportDataSize, len(reportData))
 	}
@@ -133,11 +162,12 @@ func CollectEvidenceWithReportData(nonce []byte, reportData []byte) (*Evidence, 
 	log.Printf("Waiting %v for HCL firmware to regenerate SNP report...", ReportDataRefreshDelay)
 	time.Sleep(ReportDataRefreshDelay)
 
-	return collectEvidenceFromTPM(tpmDev, nonce)
+	return collectEvidenceFromTPM(tpmDev, nonce, pcrSlots)
 }
 
 // collectEvidenceFromTPM performs the attestation using an already-opened TPM.
-func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) {
+// If pcrSlots is nil, all 24 PCRs (0-23) are selected.
+func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte, pcrSlots []int) (*Evidence, error) {
 	akHandle := tpm2.TPMHandle(AIKPersistentHandle)
 
 	// 2. Read the pre-provisioned AIK
@@ -155,7 +185,9 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) 
 		log.Printf("AIK certificate: %d bytes", len(aikCert))
 	}
 
-	// 4. Generate TPM Quote over PCRs 0-7
+	// 4. Generate TPM Quote over selected PCRs
+	pcrSelection := BuildPCRSelection(pcrSlots)
+	log.Printf("PCR selection: %v", pcrSlots)
 	quoteRsp, err := tpm2.Quote{
 		SignHandle: tpm2.AuthHandle{
 			Handle: akHandle,
@@ -166,14 +198,7 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) 
 		InScheme: tpm2.TPMTSigScheme{
 			Scheme: tpm2.TPMAlgNull,
 		},
-		PCRSelect: tpm2.TPMLPCRSelection{
-			PCRSelections: []tpm2.TPMSPCRSelection{
-				{
-					Hash:      tpm2.TPMAlgSHA256,
-					PCRSelect: tpm2.PCClientCompatible.PCRs(0, 1, 2, 3, 4, 5, 6, 7),
-				},
-			},
-		},
+		PCRSelect: pcrSelection,
 	}.Execute(tpm)
 	if err != nil {
 		return nil, fmt.Errorf("TPM Quote: %w", err)
@@ -188,11 +213,18 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) 
 
 	log.Println("TPM Quote generated.")
 
-	// 5. Hash TPM Quote
+	// 5. Read selected SHA256 PCR values to include in evidence
+	pcrs, err := ReadPCRs(tpm, pcrSlots)
+	if err != nil {
+		return nil, fmt.Errorf("read PCRs: %w", err)
+	}
+	log.Printf("Read %d PCR values", len(pcrs))
+
+	// 6. Hash TPM Quote
 	quoteHash := sha256.Sum256(quoteBlob.Bytes())
 	log.Printf("SHA256(Quote): %x", quoteHash)
 
-	// 6. Read HCL report from vTPM NVRAM (contains SNP report)
+	// 7. Read HCL report from vTPM NVRAM (contains SNP report)
 	hclBlob, err := GetHCLReport(tpm)
 	if err != nil {
 		return nil, fmt.Errorf("read HCL report: %w", err)
@@ -206,7 +238,7 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) 
 	snpReport := hclBlob[HCLReportHeaderSize : HCLReportHeaderSize+SNPReportSize]
 	log.Printf("SNP report extracted: %d bytes", len(snpReport))
 
-	// 7. Parse runtime claims from HCL report
+	// 8. Parse runtime claims from HCL report
 	var runtimeClaims *RuntimeClaims
 	rc, err := ParseRuntimeClaims(hclBlob)
 	if err != nil {
@@ -229,8 +261,43 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte) (*Evidence, error) 
 		HCLReport:     hclBlob,
 		SNPReport:     snpReport,
 		AIKCert:       aikCert,
+		PCRs:          pcrs,
 		RuntimeClaims: runtimeClaims,
 	}, nil
+}
+
+// ReadPCRs reads all PCR values from the TPM for the given selection.
+// The TPM may return PCRs in batches, so this loops until all are read.
+// This matches the approach from azure-cvm-tooling which reads PCR values
+// alongside the quote for verification.
+func ReadPCRs(tpm transport.TPM, pcrSlots []int) (PCRValues, error) {
+	if len(pcrSlots) == 0 {
+		pcrSlots = AllPCRs
+	}
+	pcrs := make(PCRValues, len(pcrSlots))
+
+	for _, i := range pcrSlots {
+		pcrReadRsp, err := tpm2.PCRRead{
+			PCRSelectionIn: tpm2.TPMLPCRSelection{
+				PCRSelections: []tpm2.TPMSPCRSelection{
+					{
+						Hash:      tpm2.TPMAlgSHA256,
+						PCRSelect: tpm2.PCClientCompatible.PCRs(uint(i)),
+					},
+				},
+			},
+		}.Execute(tpm)
+		if err != nil {
+			return nil, fmt.Errorf("PCRRead(%d): %w", i, err)
+		}
+
+		digests := pcrReadRsp.PCRValues.Digests
+		if len(digests) > 0 {
+			pcrs[i] = digests[0].Buffer
+		}
+	}
+
+	return pcrs, nil
 }
 
 // ReadPersistentHandle reads the public area of a persistent TPM handle.

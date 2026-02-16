@@ -6,15 +6,34 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/gaurav137/conf-node/pkg/attestation"
 )
 
 func main() {
 	reportDataFile := flag.String("report-data", "", "path to a 64-byte file to use as report_data (triggers fresh SNP report)")
+	pcrsFlag := flag.String("pcrs", "", "comma-separated list of PCR indices to include (0-23); defaults to all")
 	flag.Parse()
 
 	nonce := []byte("external-verifier-nonce")
+
+	// Parse PCR selection
+	var pcrSlots []int
+	if *pcrsFlag != "" {
+		for _, s := range strings.Split(*pcrsFlag, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			v, err := strconv.Atoi(s)
+			if err != nil || v < 0 || v > 23 {
+				log.Fatalf("Invalid PCR index %q (must be 0-23)", s)
+			}
+			pcrSlots = append(pcrSlots, v)
+		}
+	}
 
 	var evidence *attestation.Evidence
 	var err error
@@ -29,9 +48,9 @@ func main() {
 			log.Fatalf("report-data file must be exactly %d bytes, got %d", attestation.ReportDataSize, len(reportData))
 		}
 		log.Printf("Using report_data from %s", *reportDataFile)
-		evidence, err = attestation.CollectEvidenceWithReportData(nonce, reportData)
+		evidence, err = attestation.CollectEvidenceWithReportData(nonce, reportData, pcrSlots)
 	} else {
-		evidence, err = attestation.CollectEvidence(nonce)
+		evidence, err = attestation.CollectEvidence(nonce, pcrSlots)
 	}
 	if err != nil {
 		log.Fatalf("Attestation failed: %v", err)
@@ -48,6 +67,21 @@ func main() {
 		fmt.Println("Saved tpm_quote.bin, hcl_report.bin, snp_report.bin, and aik_cert.der")
 	} else {
 		fmt.Println("Saved tpm_quote.bin, hcl_report.bin, and snp_report.bin")
+	}
+
+	// Save PCR values as JSON
+	if evidence.PCRs != nil {
+		pcrOut := make(map[string]string, len(evidence.PCRs))
+		for idx, digest := range evidence.PCRs {
+			pcrOut[fmt.Sprintf("%d", idx)] = fmt.Sprintf("%x", digest)
+		}
+		pcrJSON, err := json.MarshalIndent(pcrOut, "", "  ")
+		if err != nil {
+			log.Printf("Warning: could not marshal PCR values: %v", err)
+		} else {
+			os.WriteFile("pcr_values.json", pcrJSON, 0644)
+			fmt.Println("Saved pcr_values.json")
+		}
 	}
 
 	// Save runtime claims as JSON
