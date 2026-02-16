@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,7 +11,7 @@ import (
 )
 
 func main() {
-	fresh := flag.Bool("fresh", false, "write custom report_data to 0x01400002 to trigger fresh SNP report")
+	reportDataFile := flag.String("report-data", "", "path to a 64-byte file to use as report_data (triggers fresh SNP report)")
 	flag.Parse()
 
 	nonce := []byte("external-verifier-nonce")
@@ -20,12 +19,16 @@ func main() {
 	var evidence *attestation.Evidence
 	var err error
 
-	if *fresh {
-		// Use SHA256(nonce) as report_data, zero-padded to 64 bytes
-		reportData := make([]byte, attestation.ReportDataSize)
-		h := sha256.Sum256(nonce)
-		copy(reportData, h[:])
-		log.Println("Requesting fresh SNP report with custom report_data...")
+	if *reportDataFile != "" {
+		// Read report_data from file
+		reportData, readErr := os.ReadFile(*reportDataFile)
+		if readErr != nil {
+			log.Fatalf("Failed to read report-data file: %v", readErr)
+		}
+		if len(reportData) != attestation.ReportDataSize {
+			log.Fatalf("report-data file must be exactly %d bytes, got %d", attestation.ReportDataSize, len(reportData))
+		}
+		log.Printf("Using report_data from %s", *reportDataFile)
 		evidence, err = attestation.CollectEvidenceWithReportData(nonce, reportData)
 	} else {
 		evidence, err = attestation.CollectEvidence(nonce)
