@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -63,7 +64,10 @@ func attestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nonce := rdBytes // use reportData as the TPM quote nonce
+	// TPM2 QualifyingData (TPM2B_DATA) is limited to 32 bytes.
+	// Use SHA256(reportData) as the TPM quote nonce.
+	nonceHash := sha256.Sum256(rdBytes)
+	nonce := nonceHash[:]
 	evidence, err := attestation.CollectEvidenceWithReportData(nonce, rdBytes)
 	if err != nil {
 		log.Printf("attestation failed: %v", err)

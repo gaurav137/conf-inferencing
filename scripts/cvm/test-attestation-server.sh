@@ -7,7 +7,7 @@ set -euo pipefail
 # report_data, and validates the runtime claims user-data matches the
 # public key hash.
 #
-# Usage: ./scripts/aks/test-attestation-server.sh <user@host> [ssh-key]
+# Usage: ./scripts/cvm/test-attestation-server.sh <user@host> [ssh-key]
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <user@host> [ssh-key]" >&2
@@ -19,7 +19,9 @@ SSH_KEY="${2:-~/.ssh/id_rsa}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 BINARY="bin/attestation-server"
+HELPER_SCRIPT="scripts/cvm/generate-report-local-server.sh"
 REMOTE_BIN="/tmp/attestation-server"
+REMOTE_HELPER="/tmp/generate-report-local-server.sh"
 SERVER_PORT="8900"
 LOCAL_OUT="tmp/attestation-server-output"
 
@@ -56,57 +58,29 @@ REPORT_DATA_B64=$(printf '%s' "${REPORT_DATA_HEX}" | xxd -r -p | base64 -w0)
 echo "  report_data (base64): ${REPORT_DATA_B64}"
 echo ""
 
-# 3. Upload server binary to CVM
-echo "--- Uploading binary ---"
+# 3. Upload server binary and helper script to CVM
+echo "--- Uploading binary and helper script ---"
 scp ${SSH_OPTS} "${BINARY}" "${VM_HOST}:${REMOTE_BIN}"
+scp ${SSH_OPTS} "${HELPER_SCRIPT}" "${VM_HOST}:${REMOTE_HELPER}"
+ssh ${SSH_OPTS} "${VM_HOST}" "chmod +x ${REMOTE_BIN} ${REMOTE_HELPER}"
 echo ""
 
-# 4. Start attestation server on CVM (kill any existing instance first)
-echo "--- Starting attestation-server on CVM ---"
-ssh ${SSH_OPTS} "${VM_HOST}" "sudo pkill -f attestation-server 2>/dev/null; sleep 1; sudo bash -c '${REMOTE_BIN} -addr :${SERVER_PORT} </dev/null >/tmp/attestation-server.log 2>&1 &'"
-echo "  Waiting for server to start..."
-sleep 3
-
-# Verify server is running
-if ssh ${SSH_OPTS} "${VM_HOST}" "curl -sf -o /dev/null http://localhost:${SERVER_PORT}/ 2>/dev/null"; then
-    true # any response means it's up
-elif ssh ${SSH_OPTS} "${VM_HOST}" "pgrep -f attestation-server >/dev/null 2>&1"; then
-    echo "  Server process is running"
-else
-    echo "  ERROR: Server failed to start. Log:"
-    ssh ${SSH_OPTS} "${VM_HOST}" "cat /tmp/attestation-server.log 2>/dev/null || true"
-    exit 1
-fi
-echo "  Server is running on port ${SERVER_PORT}"
+# 4. Write request JSON on the CVM
+echo "--- Preparing request ---"
+ssh ${SSH_OPTS} "${VM_HOST}" "printf '%s' '{\"reportData\":\"${REPORT_DATA_B64}\"}' > /tmp/attest_request.json"
+echo "  Request JSON written to CVM:/tmp/attest_request.json"
 echo ""
 
-# 5. Call POST /attest with reportData
-echo "--- Calling POST /attest ---"
+# 5. Run helper script on CVM (starts server, calls API, stops server — all in one SSH call)
+echo "--- Running attestation on CVM ---"
+ssh ${SSH_OPTS} "${VM_HOST}" "sudo ${REMOTE_HELPER} /tmp/attest_request.json /tmp/attest_response.json ${SERVER_PORT}"
+echo ""
+
+# 6. Download response
+echo "--- Downloading response ---"
 RESPONSE_FILE="${LOCAL_OUT}/attest_response.json"
-HTTP_CODE=$(ssh ${SSH_OPTS} "${VM_HOST}" \
-    "curl -s -w '%{http_code}' -o /tmp/attest_response.json \
-        -X POST http://localhost:${SERVER_PORT}/attest \
-        -H 'Content-Type: application/json' \
-        -d '{\"reportData\":\"${REPORT_DATA_B64}\"}'")
-
-echo "  HTTP status: ${HTTP_CODE}"
-
-if [[ "${HTTP_CODE}" != "200" ]]; then
-    echo "  ERROR: attestation request failed"
-    ssh ${SSH_OPTS} "${VM_HOST}" "cat /tmp/attest_response.json 2>/dev/null" || true
-    ssh ${SSH_OPTS} "${VM_HOST}" "sudo pkill -f attestation-server 2>/dev/null || true"
-    exit 1
-fi
-
-# Download response
 scp ${SSH_OPTS} "${VM_HOST}:/tmp/attest_response.json" "${RESPONSE_FILE}"
 echo "  Response saved to ${RESPONSE_FILE}"
-echo ""
-
-# 6. Stop server
-echo "--- Stopping attestation-server ---"
-ssh ${SSH_OPTS} "${VM_HOST}" "sudo pkill -f attestation-server 2>/dev/null || true"
-echo "  Server stopped"
 echo ""
 
 # 7. Extract and save individual artifacts
