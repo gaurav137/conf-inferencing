@@ -9,8 +9,10 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gaurav137/conf-node/pkg/hcl"
@@ -34,6 +36,31 @@ const (
 
 	amdKDSBaseURL = "https://kdsintf.amd.com"
 )
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Certificate cache
+// ──────────────────────────────────────────────────────────────────────────────
+
+// certChainEntry caches the ASK + ARK pair for a given AMD product.
+type certChainEntry struct {
+	ask *x509.Certificate
+	ark *x509.Certificate
+}
+
+var (
+	// vcekCache stores VCEK certificates keyed by "product/chipID/bl.tee.snp.ucode".
+	vcekCache sync.Map
+
+	// certChainCache stores ASK+ARK pairs keyed by product name.
+	certChainCache sync.Map
+)
+
+// vcekCacheKey builds the cache key for a VCEK lookup.
+func vcekCacheKey(product string, chipID []byte, tcb TCBVersion) string {
+	return fmt.Sprintf("%s/%s/%d.%d.%d.%d",
+		product, hex.EncodeToString(chipID),
+		tcb.Bootloader, tcb.TEE, tcb.SNP, tcb.Microcode)
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TCB version
@@ -66,10 +93,20 @@ func ParseTCBVersion(tcb []byte) TCBVersion {
 // AMD Key Distribution Service (KDS) helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-// FetchVCEK downloads the VCEK certificate (DER) from AMD's KDS.
+// FetchVCEK returns the VCEK certificate for the given chip and TCB version.
+// Results are cached in memory so repeated calls for the same chip avoid
+// additional network round-trips to AMD's KDS.
 //
 //	URL: https://kdsintf.amd.com/vcek/v1/{product}/{chip_id_hex}?blSPL=…&teeSPL=…&snpSPL=…&ucodeSPL=…
 func FetchVCEK(product string, chipID []byte, tcb TCBVersion) (*x509.Certificate, error) {
+	key := vcekCacheKey(product, chipID, tcb)
+
+	// Check cache first.
+	if v, ok := vcekCache.Load(key); ok {
+		log.Printf("VCEK cache hit: %s", key)
+		return v.(*x509.Certificate), nil
+	}
+
 	chipIDHex := hex.EncodeToString(chipID)
 	url := fmt.Sprintf("%s/vcek/v1/%s/%s?blSPL=%d&teeSPL=%d&snpSPL=%d&ucodeSPL=%d",
 		amdKDSBaseURL, product, chipIDHex,
@@ -95,15 +132,26 @@ func FetchVCEK(product string, chipID []byte, tcb TCBVersion) (*x509.Certificate
 	if err != nil {
 		return nil, fmt.Errorf("parse VCEK certificate: %w", err)
 	}
+
+	vcekCache.Store(key, cert)
+	log.Printf("VCEK cached: %s", key)
 	return cert, nil
 }
 
-// FetchCertChain downloads the ASK + ARK certificate chain (PEM) from AMD's
-// KDS and returns (ASK, ARK).  The root (ARK) is identified by checking which
-// certificate is self-signed.
+// FetchCertChain returns the ASK + ARK certificate chain for the given AMD
+// product.  Results are cached in memory so repeated calls for the same
+// product avoid additional network round-trips to AMD's KDS.
+// The root (ARK) is identified by checking which certificate is self-signed.
 //
 //	URL: https://kdsintf.amd.com/vcek/v1/{product}/cert_chain
 func FetchCertChain(product string) (ask, ark *x509.Certificate, err error) {
+	// Check cache first.
+	if v, ok := certChainCache.Load(product); ok {
+		entry := v.(*certChainEntry)
+		log.Printf("Cert chain cache hit: %s", product)
+		return entry.ask, entry.ark, nil
+	}
+
 	url := fmt.Sprintf("%s/vcek/v1/%s/cert_chain", amdKDSBaseURL, product)
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -152,6 +200,9 @@ func FetchCertChain(product string) (ask, ark *x509.Certificate, err error) {
 	if ark == nil || ask == nil {
 		return nil, nil, fmt.Errorf("could not distinguish ASK/ARK in cert chain")
 	}
+
+	certChainCache.Store(product, &certChainEntry{ask: ask, ark: ark})
+	log.Printf("Cert chain cached: %s", product)
 	return ask, ark, nil
 }
 
