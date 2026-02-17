@@ -6,12 +6,12 @@ package attestation
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
+	"github.com/gaurav137/conf-node/pkg/hcl"
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
@@ -30,12 +30,6 @@ const (
 	// HCLReportNVIndex is the NV index where the HCL firmware stores
 	// the SNP attestation report on Azure CVMs.
 	HCLReportNVIndex = 0x01400001
-
-	// HCLReportHeaderSize is the size of the HCL header before the SNP report.
-	HCLReportHeaderSize = 32
-
-	// SNPReportSize is the size of the raw AMD SNP attestation report.
-	SNPReportSize = 1184
 
 	// ReportDataNVIndex is the NV index used to trigger SNP report regeneration
 	// with custom report_data on Azure CVMs. Writing 64 bytes here causes the
@@ -69,18 +63,6 @@ type VMConfiguration struct {
 	TPMPersisted       bool   `json:"tpm-persisted"`
 	VMUniqueID         string `json:"vmUniqueId"`
 }
-
-// runtimeDataHeader is the binary header of the Runtime Data section in the HCL report.
-// It immediately follows the SNP report payload (offset 1216 from start of HCL blob).
-type runtimeDataHeader struct {
-	DataSize   uint32
-	Version    uint32
-	ReportType uint32
-	HashType   uint32
-	ClaimSize  uint32
-}
-
-const runtimeDataHeaderSize = 20 // 5 x uint32
 
 // DefaultPCRs is the default set of PCR slots (0-23), matching azure-cvm-tooling.
 var DefaultPCRs = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
@@ -230,11 +212,10 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte, pcrSlots []int) (*E
 	}
 	log.Printf("HCL report size: %d bytes", len(hclBlob))
 
-	if len(hclBlob) < HCLReportHeaderSize+SNPReportSize {
-		return nil, fmt.Errorf("HCL report too small (%d bytes), expected at least %d",
-			len(hclBlob), HCLReportHeaderSize+SNPReportSize)
+	snpReport, err := hcl.ExtractSNPReport(hclBlob)
+	if err != nil {
+		return nil, err
 	}
-	snpReport := hclBlob[HCLReportHeaderSize : HCLReportHeaderSize+SNPReportSize]
 	log.Printf("SNP report extracted: %d bytes", len(snpReport))
 
 	// 8. Parse runtime claims from HCL report
@@ -335,31 +316,19 @@ func GetHCLReportWithReportData(tpm transport.TPM, reportData []byte) ([]byte, e
 }
 
 // ParseRuntimeClaims extracts and parses the JSON runtime claims from an HCL
-// report blob. The runtime data starts at offset HCLReportHeaderSize + SNPReportSize
-// (1216) and contains a 20-byte header followed by the JSON claims.
+// report blob.  Uses the shared hcl package for binary layout parsing.
 func ParseRuntimeClaims(hclBlob []byte) (*RuntimeClaims, error) {
-	runtimeDataOffset := HCLReportHeaderSize + SNPReportSize
-	if len(hclBlob) < runtimeDataOffset+runtimeDataHeaderSize {
-		return nil, fmt.Errorf("HCL blob too small for runtime data header: %d bytes", len(hclBlob))
+	hdr, err := hcl.ParseRuntimeDataHeader(hclBlob)
+	if err != nil {
+		return nil, err
 	}
-
-	// Parse the runtime data header
-	var hdr runtimeDataHeader
-	reader := bytes.NewReader(hclBlob[runtimeDataOffset : runtimeDataOffset+runtimeDataHeaderSize])
-	if err := binary.Read(reader, binary.LittleEndian, &hdr); err != nil {
-		return nil, fmt.Errorf("read runtime data header: %w", err)
-	}
-
 	log.Printf("Runtime data: version=%d, reportType=%d, hashType=%d, claimSize=%d",
 		hdr.Version, hdr.ReportType, hdr.HashType, hdr.ClaimSize)
 
-	claimsStart := runtimeDataOffset + runtimeDataHeaderSize
-	claimsEnd := claimsStart + int(hdr.ClaimSize)
-	if claimsEnd > len(hclBlob) {
-		return nil, fmt.Errorf("runtime claims exceed HCL blob: need %d, have %d", claimsEnd, len(hclBlob))
+	claimsJSON, err := hcl.ExtractRuntimeClaimsRaw(hclBlob)
+	if err != nil {
+		return nil, err
 	}
-
-	claimsJSON := hclBlob[claimsStart:claimsEnd]
 
 	var claims RuntimeClaims
 	if err := json.Unmarshal(claimsJSON, &claims); err != nil {

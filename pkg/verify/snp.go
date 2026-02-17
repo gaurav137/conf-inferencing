@@ -12,6 +12,8 @@ import (
 	"math/big"
 	"net/http"
 	"time"
+
+	"github.com/gaurav137/conf-node/pkg/hcl"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -20,7 +22,6 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 const (
-	snpReportSize        = 1184 // Total SNP attestation report size
 	snpReportDataOffset  = 0x50 // report_data field (64 bytes)
 	snpReportDataSize    = 64
 	snpReportedTCBOffset = 0x180 // reported_tcb field (8 bytes)
@@ -185,7 +186,7 @@ func VerifySNPCertChain(vcek, ask, ark *x509.Certificate) error {
 // The signature components R and S are stored in little-endian format in the
 // report, each padded from 48 to 72 bytes.
 func VerifySNPReportSignature(snpReport []byte, vcek *x509.Certificate) error {
-	if len(snpReport) < snpReportSize {
+	if len(snpReport) < hcl.SNPReportSize {
 		return fmt.Errorf("SNP report too small: %d bytes", len(snpReport))
 	}
 
@@ -233,10 +234,10 @@ func VerifySNPReportSignature(snpReport []byte, vcek *x509.Certificate) error {
 func VerifySNPReport(snpReport []byte, product string) map[string]CheckResult {
 	results := make(map[string]CheckResult)
 
-	if len(snpReport) < snpReportSize {
+	if len(snpReport) < hcl.SNPReportSize {
 		results["snpReportFormat"] = CheckResult{
 			Passed: false,
-			Error:  fmt.Sprintf("SNP report too small: %d bytes (need %d)", len(snpReport), snpReportSize),
+			Error:  fmt.Sprintf("SNP report too small: %d bytes (need %d)", len(snpReport), hcl.SNPReportSize),
 		}
 		return results
 	}

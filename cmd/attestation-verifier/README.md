@@ -58,7 +58,7 @@ Verifies attestation evidence and returns per-check results.
 | `evidence.snpReport` | string | Yes | Base64-encoded 1184-byte AMD SNP attestation report. |
 | `evidence.aikCert` | string | No | Base64-encoded AIK x.509 certificate (DER). |
 | `evidence.pcrs` | object | Yes | SHA256 PCR values as `{ "index": "<base64 digest>", ... }`. |
-| `nonce` | string | Yes | Expected TPM quote nonce. Can be base64-encoded bytes or a raw string (e.g. `"attestation-nonce-default"`). |
+| `nonce` | string | Yes | Expected TPM quote nonce (must match the nonce sent to the attestation-server). Base64-encoded bytes or a raw string. |
 | `product` | string | No | AMD product name for KDS certificate lookup. Defaults to `"Milan"`. Use `"Genoa"` for 4th-gen EPYC. |
 
 #### Response
@@ -138,15 +138,16 @@ AMD Root Key (ARK)          ← self-signed, fetched from AMD KDS
 
 ```bash
 # 1. Collect evidence from a CVM (attestation-server running on port 8900)
+NONCE=$(openssl rand -base64 32)
 EVIDENCE=$(curl -s -X POST http://<cvm-ip>:8900/attest \
   -H "Content-Type: application/json" \
-  -d '{"reportData": "<base64-64-bytes>"}')
+  -d "{\"reportData\": \"<base64-64-bytes>\", \"nonce\": \"$NONCE\"}")
 
 # 2. Verify the evidence (attestation-verifier running on port 8901)
 curl -s -X POST http://localhost:8901/verify \
   -H "Content-Type: application/json" \
   -d "{
     \"evidence\": $EVIDENCE,
-    \"nonce\": \"attestation-nonce-default\"
+    \"nonce\": \"$NONCE\"
   }" | jq .
 ```

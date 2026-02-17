@@ -18,17 +18,8 @@ import (
 	"math/big"
 	"sort"
 
+	"github.com/gaurav137/conf-node/pkg/hcl"
 	"github.com/google/go-tpm/tpm2"
-)
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Constants
-// ──────────────────────────────────────────────────────────────────────────────
-
-const (
-	// HCL report layout
-	hclHeaderSize         = 32
-	runtimeDataHeaderSize = 20 // 5 × uint32
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -194,38 +185,14 @@ func VerifyAll(input *EvidenceInput) *VerifyResult {
 // Runtime claims parsing from HCL report
 // ──────────────────────────────────────────────────────────────────────────────
 
-// runtimeDataHeader is the binary header of the Runtime Data section in the HCL report.
-// It immediately follows the SNP report payload (offset 1216 from start of HCL blob).
-type runtimeDataHeader struct {
-	DataSize   uint32
-	Version    uint32
-	ReportType uint32
-	HashType   uint32
-	ClaimSize  uint32
-}
-
 // parseRuntimeClaimsFromHCL extracts the raw JSON runtime claims from the HCL
-// report blob. The runtime data starts at offset hclHeaderSize + snpReportSize
-// (1216) and contains a 20-byte header followed by the JSON claims.
+// report blob using the shared hcl package.
 func parseRuntimeClaimsFromHCL(hclReport []byte) (json.RawMessage, error) {
-	rdOffset := hclHeaderSize + snpReportSize
-	if len(hclReport) < rdOffset+runtimeDataHeaderSize {
-		return nil, fmt.Errorf("HCL report too small for runtime data header: %d bytes", len(hclReport))
+	raw, err := hcl.ExtractRuntimeClaimsRaw(hclReport)
+	if err != nil {
+		return nil, err
 	}
-
-	var hdr runtimeDataHeader
-	r := bytes.NewReader(hclReport[rdOffset : rdOffset+runtimeDataHeaderSize])
-	if err := binary.Read(r, binary.LittleEndian, &hdr); err != nil {
-		return nil, fmt.Errorf("read runtime data header: %w", err)
-	}
-
-	claimsStart := rdOffset + runtimeDataHeaderSize
-	claimsEnd := claimsStart + int(hdr.ClaimSize)
-	if claimsEnd > len(hclReport) {
-		return nil, fmt.Errorf("runtime claims exceed HCL blob: need %d, have %d", claimsEnd, len(hclReport))
-	}
-
-	return json.RawMessage(hclReport[claimsStart:claimsEnd]), nil
+	return json.RawMessage(raw), nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -373,28 +340,16 @@ func verifyPCRDigest(pcrValues map[int][]byte, expectedDigest []byte) error {
 // snpReport.report_data[0:32].  The HCL firmware hashes only the claims JSON
 // (after the 20-byte runtime data header), not the entire variable data region.
 func verifyReportDataBinding(hclReport, snpReport []byte) error {
-	rdOffset := hclHeaderSize + snpReportSize
-	if len(hclReport) < rdOffset+runtimeDataHeaderSize {
-		return fmt.Errorf("HCL report too small for runtime data header: %d bytes", len(hclReport))
-	}
 	if len(snpReport) < snpReportDataOffset+snpReportDataSize {
 		return fmt.Errorf("SNP report too small: %d bytes", len(snpReport))
 	}
 
-	// Read ClaimSize from the runtime data header (5th uint32, offset 16).
-	var hdr runtimeDataHeader
-	r := bytes.NewReader(hclReport[rdOffset : rdOffset+runtimeDataHeaderSize])
-	if err := binary.Read(r, binary.LittleEndian, &hdr); err != nil {
-		return fmt.Errorf("read runtime data header: %w", err)
+	claimsJSON, err := hcl.ExtractRuntimeClaimsRaw(hclReport)
+	if err != nil {
+		return err
 	}
 
-	claimsStart := rdOffset + runtimeDataHeaderSize
-	claimsEnd := claimsStart + int(hdr.ClaimSize)
-	if claimsEnd > len(hclReport) {
-		return fmt.Errorf("runtime claims exceed HCL blob: need %d, have %d", claimsEnd, len(hclReport))
-	}
-
-	claimsHash := sha256.Sum256(hclReport[claimsStart:claimsEnd])
+	claimsHash := sha256.Sum256(claimsJSON)
 	reportData := snpReport[snpReportDataOffset : snpReportDataOffset+32]
 
 	if !bytes.Equal(claimsHash[:], reportData) {

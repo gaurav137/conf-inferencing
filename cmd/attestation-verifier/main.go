@@ -44,6 +44,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gaurav137/conf-node/pkg/httputil"
 	"github.com/gaurav137/conf-node/pkg/verify"
 )
 
@@ -89,13 +90,13 @@ func main() {
 
 func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed, use POST", http.StatusMethodNotAllowed)
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "use POST")
 		return
 	}
 
 	var req VerifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("invalid JSON body: %v", err), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidRequestBody", fmt.Sprintf("invalid JSON body: %v", err))
 		return
 	}
 
@@ -103,19 +104,19 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 
 	tpmQuote, err := base64.StdEncoding.DecodeString(req.Evidence.TPMQuote)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid tpmQuote base64: %v", err), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidTPMQuote", fmt.Sprintf("invalid tpmQuote base64: %v", err))
 		return
 	}
 
 	hclReport, err := base64.StdEncoding.DecodeString(req.Evidence.HCLReport)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid hclReport base64: %v", err), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidHCLReport", fmt.Sprintf("invalid hclReport base64: %v", err))
 		return
 	}
 
 	snpReport, err := base64.StdEncoding.DecodeString(req.Evidence.SNPReport)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid snpReport base64: %v", err), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidSNPReport", fmt.Sprintf("invalid snpReport base64: %v", err))
 		return
 	}
 
@@ -123,7 +124,7 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Evidence.AIKCert != "" {
 		aikCert, err = base64.StdEncoding.DecodeString(req.Evidence.AIKCert)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid aikCert base64: %v", err), http.StatusBadRequest)
+			httputil.WriteError(w, http.StatusBadRequest, "InvalidAIKCert", fmt.Sprintf("invalid aikCert base64: %v", err))
 			return
 		}
 	}
@@ -134,12 +135,12 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.Evidence.PCRs {
 		idx, err := strconv.Atoi(k)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid PCR index %q: %v", k, err), http.StatusBadRequest)
+			httputil.WriteError(w, http.StatusBadRequest, "InvalidPCRIndex", fmt.Sprintf("invalid PCR index %q: %v", k, err))
 			return
 		}
 		digest, err := base64.StdEncoding.DecodeString(v)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid base64 for PCR %d: %v", idx, err), http.StatusBadRequest)
+			httputil.WriteError(w, http.StatusBadRequest, "InvalidPCRValue", fmt.Sprintf("invalid base64 for PCR %d: %v", idx, err))
 			return
 		}
 		pcrValues[idx] = digest

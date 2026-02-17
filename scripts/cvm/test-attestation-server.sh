@@ -56,6 +56,10 @@ echo "  SHA256(pubkey): ${PUBKEY_HASH}"
 REPORT_DATA_HEX="${PUBKEY_HASH}$(printf '%064d' 0)"
 REPORT_DATA_B64=$(printf '%s' "${REPORT_DATA_HEX}" | xxd -r -p | base64 -w0)
 echo "  report_data (base64): ${REPORT_DATA_B64}"
+
+# Generate a random 32-byte nonce for the TPM quote
+NONCE_B64=$(openssl rand -base64 32)
+echo "  nonce (base64): ${NONCE_B64}"
 echo ""
 
 # 3. Upload server binary and helper script to CVM
@@ -67,7 +71,7 @@ echo ""
 
 # 4. Write request JSON on the CVM
 echo "--- Preparing request ---"
-ssh ${SSH_OPTS} "${VM_HOST}" "printf '%s' '{\"reportData\":\"${REPORT_DATA_B64}\"}' > /tmp/attest_request.json"
+ssh ${SSH_OPTS} "${VM_HOST}" "printf '%s' '{\"reportData\":\"${REPORT_DATA_B64}\",\"nonce\":\"${NONCE_B64}\"}' > /tmp/attest_request.json"
 echo "  Request JSON written to CVM:/tmp/attest_request.json"
 echo ""
 

@@ -9,15 +9,13 @@ import (
 	"net/http"
 
 	"github.com/gaurav137/conf-node/pkg/attestation"
+	"github.com/gaurav137/conf-node/pkg/httputil"
 )
-
-// defaultNonce is used as the TPM quote nonce when no nonce is provided.
-const defaultNonce = "attestation-nonce-default"
 
 // AttestRequest is the JSON body expected by the /attest endpoint.
 type AttestRequest struct {
 	ReportData   string `json:"reportData"`             // base64-encoded 64-byte report_data for SNP report
-	Nonce        string `json:"nonce,omitempty"`        // optional base64-encoded nonce for TPM quote (max 32 bytes); defaults to fixed string
+	Nonce        string `json:"nonce"`                  // base64-encoded nonce for TPM quote (max 32 bytes)
 	PCRSelection []int  `json:"pcrSelection,omitempty"` // optional list of PCR indices (0-23); defaults to all 24
 }
 
@@ -43,53 +41,52 @@ func main() {
 
 func attestHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed, use POST", http.StatusMethodNotAllowed)
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "use POST")
 		return
 	}
 
 	var req AttestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("invalid JSON body: %v", err), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidRequestBody", fmt.Sprintf("invalid JSON body: %v", err))
 		return
 	}
 
 	if req.ReportData == "" {
-		http.Error(w, "reportData is required", http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "MissingReportData", "reportData is required")
 		return
 	}
 
 	rdBytes, err := base64.StdEncoding.DecodeString(req.ReportData)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid base64 reportData: %v", err), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidReportData", fmt.Sprintf("invalid base64 reportData: %v", err))
 		return
 	}
 	if len(rdBytes) != attestation.ReportDataSize {
-		http.Error(w, fmt.Sprintf("reportData must be exactly %d bytes, got %d",
-			attestation.ReportDataSize, len(rdBytes)), http.StatusBadRequest)
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidReportDataSize",
+			fmt.Sprintf("reportData must be exactly %d bytes, got %d", attestation.ReportDataSize, len(rdBytes)))
 		return
 	}
 
-	// Determine the TPM quote nonce.
-	// If the caller provided a nonce, decode and use it (max 32 bytes).
-	// Otherwise fall back to the fixed default string.
-	var nonce []byte
-	if req.Nonce != "" {
-		nonce, err = base64.StdEncoding.DecodeString(req.Nonce)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("invalid base64 nonce: %v", err), http.StatusBadRequest)
-			return
-		}
-		if len(nonce) > 32 {
-			http.Error(w, fmt.Sprintf("nonce must be at most 32 bytes, got %d", len(nonce)), http.StatusBadRequest)
-			return
-		}
-	} else {
-		nonce = []byte(defaultNonce)
+	// Decode and validate the nonce (required, max 32 bytes).
+	if req.Nonce == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "MissingNonce", "nonce is required")
+		return
+	}
+	nonce, err := base64.StdEncoding.DecodeString(req.Nonce)
+	if err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidNonce", fmt.Sprintf("invalid base64 nonce: %v", err))
+		return
+	}
+	if len(nonce) > 32 {
+		httputil.WriteError(w, http.StatusBadRequest, "InvalidNonceSize",
+			fmt.Sprintf("nonce must be at most 32 bytes, got %d", len(nonce)))
+		return
 	}
 	// Validate PCR selection if provided
 	for _, pcr := range req.PCRSelection {
 		if pcr < 0 || pcr > 23 {
-			http.Error(w, fmt.Sprintf("pcrSelection values must be 0-23, got %d", pcr), http.StatusBadRequest)
+			httputil.WriteError(w, http.StatusBadRequest, "InvalidPCRSelection",
+				fmt.Sprintf("pcrSelection values must be 0-23, got %d", pcr))
 			return
 		}
 	}
@@ -97,7 +94,7 @@ func attestHandler(w http.ResponseWriter, r *http.Request) {
 	evidence, err := attestation.CollectEvidenceWithReportData(nonce, rdBytes, req.PCRSelection)
 	if err != nil {
 		log.Printf("attestation failed: %v", err)
-		http.Error(w, fmt.Sprintf("attestation failed: %v", err), http.StatusInternalServerError)
+		httputil.WriteError(w, http.StatusInternalServerError, "AttestationFailed", fmt.Sprintf("attestation failed: %v", err))
 		return
 	}
 
