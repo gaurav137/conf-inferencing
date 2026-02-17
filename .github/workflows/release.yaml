@@ -136,6 +136,21 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
             org.opencontainers.image.description=HTTP REST API server for TPM/SNP attestation on Azure Confidential VMs
 
+      - name: Build and push attestation-verifier container image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.attestation-verifier
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/attestation-verifier:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/attestation-verifier:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+            org.opencontainers.image.description=HTTP REST API server for verifying TPM/SNP attestation evidence from Azure Confidential VMs
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -160,6 +175,10 @@ jobs:
             dist/attestation-cli-linux-amd64.tar.gz.sha256
             dist/attestation-cli-linux-arm64.tar.gz
             dist/attestation-cli-linux-arm64.tar.gz.sha256
+            dist/attestation-verifier-linux-amd64.tar.gz
+            dist/attestation-verifier-linux-amd64.tar.gz.sha256
+            dist/attestation-verifier-linux-arm64.tar.gz
+            dist/attestation-verifier-linux-arm64.tar.gz.sha256
             scripts/install.sh
             scripts/uninstall.sh
           body_path: /tmp/release-notes.txt
