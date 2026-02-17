@@ -37,16 +37,16 @@ echo ""
 echo "--- Generating RSA key pair ---"
 mkdir -p "${LOCAL_OUT}"
 RSA_PRIVATE="${LOCAL_OUT}/test_key.pem"
-RSA_PUBLIC_DER="${LOCAL_OUT}/test_key_pub.der"
+RSA_PUBLIC_PEM="${LOCAL_OUT}/test_key_pub.pem"
 REPORT_DATA_FILE="${LOCAL_OUT}/report_data.bin"
 
 openssl genrsa -out "${RSA_PRIVATE}" 2048 2>/dev/null
-openssl rsa -in "${RSA_PRIVATE}" -pubout -outform DER -out "${RSA_PUBLIC_DER}" 2>/dev/null
+openssl rsa -in "${RSA_PRIVATE}" -pubout -outform PEM -out "${RSA_PUBLIC_PEM}" 2>/dev/null
 echo "  Private key: ${RSA_PRIVATE}"
-echo "  Public key (DER): ${RSA_PUBLIC_DER} ($(wc -c < "${RSA_PUBLIC_DER}") bytes)"
+echo "  Public key (PEM): ${RSA_PUBLIC_PEM}"
 
 # report_data = SHA256(pubkey DER) (32 bytes) + 32 zero bytes = 64 bytes total
-PUBKEY_HASH=$(sha256sum "${RSA_PUBLIC_DER}" | cut -d' ' -f1)
+PUBKEY_HASH=$(openssl rsa -in "${RSA_PRIVATE}" -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)
 echo "  SHA256(pubkey): ${PUBKEY_HASH}"
 
 # Write 64-byte report_data: 32 bytes of hash + 32 bytes of zeros
