@@ -278,7 +278,7 @@ echo "--- Building verify request ---"
 VERIFY_REQUEST_FILE="${LOCAL_OUT}/verify_request.json"
 jq -n --slurpfile evidence "${LOCAL_OUT}/attest_response.json" \
     --arg nonce "${NONCE_B64}" \
-    '{evidence: $evidence[0], nonce: $nonce}' \
+    '{evidence: ($evidence[0] | del(.runtimeClaims)), nonce: $nonce}' \
     > "${VERIFY_REQUEST_FILE}"
 echo "  Verify request saved to ${VERIFY_REQUEST_FILE}"
 echo ""
