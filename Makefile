@@ -11,17 +11,18 @@ KUBELET_PROXY := kubelet-proxy
 SIGNING_SERVER := local-signing-server
 ATTESTATION_CLIENT := attestation-cli
 ATTESTATION_SERVER := attestation-server
+ATTESTATION_VERIFIER := attestation-verifier
 
 # Build flags
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: all build clean kubelet-proxy local-signing-server attestation-cli attestation-server help release
+.PHONY: all build clean kubelet-proxy local-signing-server attestation-cli attestation-server attestation-verifier help release
 
 ## all: Build all binaries
 all: build
 
 ## build: Build all binaries
-build: kubelet-proxy local-signing-server attestation-cli attestation-server
+build: kubelet-proxy local-signing-server attestation-cli attestation-server attestation-verifier
 
 ## kubelet-proxy: Build the kubelet-proxy binary
 kubelet-proxy:
@@ -46,6 +47,12 @@ attestation-server:
 	@echo "Building attestation-server..."
 	@mkdir -p $(BUILD_DIR)
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(ATTESTATION_SERVER) ./cmd/attestation-server
+
+## attestation-verifier: Build the attestation-verifier binary
+attestation-verifier:
+	@echo "Building attestation-verifier..."
+	@mkdir -p $(BUILD_DIR)
+	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(ATTESTATION_VERIFIER) ./cmd/attestation-verifier
 
 ## clean: Remove build artifacts
 clean:
@@ -128,6 +135,20 @@ release: clean
 	tar -czf $(DIST_DIR)/attestation-server-linux-arm64.tar.gz -C $(DIST_DIR) attestation-server
 	sha256sum $(DIST_DIR)/attestation-server-linux-arm64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/attestation-server-linux-arm64.tar.gz.sha256
 	@rm $(DIST_DIR)/attestation-server
+	
+	@# Build attestation-verifier linux/amd64
+	@echo "Building attestation-verifier linux/amd64..."
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST_DIR)/attestation-verifier ./cmd/attestation-verifier
+	tar -czf $(DIST_DIR)/attestation-verifier-linux-amd64.tar.gz -C $(DIST_DIR) attestation-verifier
+	sha256sum $(DIST_DIR)/attestation-verifier-linux-amd64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/attestation-verifier-linux-amd64.tar.gz.sha256
+	@rm $(DIST_DIR)/attestation-verifier
+	
+	@# Build attestation-verifier linux/arm64
+	@echo "Building attestation-verifier linux/arm64..."
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST_DIR)/attestation-verifier ./cmd/attestation-verifier
+	tar -czf $(DIST_DIR)/attestation-verifier-linux-arm64.tar.gz -C $(DIST_DIR) attestation-verifier
+	sha256sum $(DIST_DIR)/attestation-verifier-linux-arm64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/attestation-verifier-linux-arm64.tar.gz.sha256
+	@rm $(DIST_DIR)/attestation-verifier
 	
 	@echo "Release artifacts created in $(DIST_DIR)/"
 	@ls -la $(DIST_DIR)/

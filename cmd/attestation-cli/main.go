@@ -62,36 +62,26 @@ func main() {
 	os.WriteFile("tpm_quote.bin", evidence.TPMQuote, 0644)
 	os.WriteFile("hcl_report.bin", evidence.HCLReport, 0644)
 	os.WriteFile("snp_report.bin", evidence.SNPReport, 0644)
-	if evidence.AIKCert != nil {
-		os.WriteFile("aik_cert.der", evidence.AIKCert, 0644)
-		fmt.Println("Saved tpm_quote.bin, hcl_report.bin, snp_report.bin, and aik_cert.der")
-	} else {
-		fmt.Println("Saved tpm_quote.bin, hcl_report.bin, and snp_report.bin")
-	}
+	os.WriteFile("aik_cert.der", evidence.AIKCert, 0644)
+	fmt.Println("Saved tpm_quote.bin, hcl_report.bin, snp_report.bin, and aik_cert.der")
 
 	// Save PCR values as JSON
-	if evidence.PCRs != nil {
-		pcrOut := make(map[string]string, len(evidence.PCRs))
-		for idx, digest := range evidence.PCRs {
-			pcrOut[fmt.Sprintf("%d", idx)] = fmt.Sprintf("%x", digest)
-		}
-		pcrJSON, err := json.MarshalIndent(pcrOut, "", "  ")
-		if err != nil {
-			log.Printf("Warning: could not marshal PCR values: %v", err)
-		} else {
-			os.WriteFile("pcr_values.json", pcrJSON, 0644)
-			fmt.Println("Saved pcr_values.json")
-		}
+	pcrOut := make(map[string]string, len(evidence.PCRs))
+	for idx, digest := range evidence.PCRs {
+		pcrOut[fmt.Sprintf("%d", idx)] = fmt.Sprintf("%x", digest)
 	}
+	pcrJSON, err := json.MarshalIndent(pcrOut, "", "  ")
+	if err != nil {
+		log.Fatalf("Failed to marshal PCR values: %v", err)
+	}
+	os.WriteFile("pcr_values.json", pcrJSON, 0644)
+	fmt.Println("Saved pcr_values.json")
 
 	// Save runtime claims as JSON
-	if evidence.RuntimeClaims != nil {
-		claimsJSON, err := json.MarshalIndent(evidence.RuntimeClaims, "", "  ")
-		if err != nil {
-			log.Printf("Warning: could not marshal runtime claims: %v", err)
-		} else {
-			os.WriteFile("runtime_claims.json", claimsJSON, 0644)
-			fmt.Println("Saved runtime_claims.json")
-		}
+	claimsJSON, err := json.MarshalIndent(evidence.RuntimeClaims, "", "  ")
+	if err != nil {
+		log.Fatalf("Failed to marshal runtime claims: %v", err)
 	}
+	os.WriteFile("runtime_claims.json", claimsJSON, 0644)
+	fmt.Println("Saved runtime_claims.json")
 }

@@ -114,9 +114,9 @@ type Evidence struct {
 	QuoteHash     [32]byte
 	HCLReport     []byte         // Full HCL report blob from NVRAM
 	SNPReport     []byte         // Raw AMD SNP report extracted from HCL report
-	AIKCert       []byte         // AIK x.509 certificate (DER), may be nil
+	AIKCert       []byte         // AIK x.509 certificate (DER)
 	PCRs          PCRValues      // SHA256 PCR values for selected slots
-	RuntimeClaims *RuntimeClaims // Parsed runtime claims from HCL report, may be nil
+	RuntimeClaims *RuntimeClaims // Parsed runtime claims from HCL report
 }
 
 // CollectEvidence opens the TPM, reads the Azure-provisioned AIK, generates
@@ -180,10 +180,9 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte, pcrSlots []int) (*E
 	// 3. Read AIK certificate from NV index
 	aikCert, err := NVRead(tpm, tpm2.TPMHandle(AIKCertNVIndex))
 	if err != nil {
-		log.Printf("Warning: could not read AIK cert from NV 0x%08x: %v", AIKCertNVIndex, err)
-	} else {
-		log.Printf("AIK certificate: %d bytes", len(aikCert))
+		return nil, fmt.Errorf("read AIK cert from NV 0x%08x: %w", AIKCertNVIndex, err)
 	}
+	log.Printf("AIK certificate: %d bytes", len(aikCert))
 
 	// 4. Generate TPM Quote over selected PCRs
 	pcrSelection := BuildPCRSelection(pcrSlots)
@@ -239,20 +238,17 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte, pcrSlots []int) (*E
 	log.Printf("SNP report extracted: %d bytes", len(snpReport))
 
 	// 8. Parse runtime claims from HCL report
-	var runtimeClaims *RuntimeClaims
-	rc, err := ParseRuntimeClaims(hclBlob)
+	runtimeClaims, err := ParseRuntimeClaims(hclBlob)
 	if err != nil {
-		log.Printf("Warning: could not parse runtime claims: %v", err)
-	} else {
-		runtimeClaims = rc
-		log.Printf("Runtime claims parsed: %d keys, user-data length=%d",
-			len(runtimeClaims.Keys), len(runtimeClaims.UserData))
-		if runtimeClaims.VMConfiguration != nil {
-			log.Printf("VM config: secure-boot=%v, tpm-enabled=%v, vmUniqueId=%s",
-				runtimeClaims.VMConfiguration.SecureBoot,
-				runtimeClaims.VMConfiguration.TPMEnabled,
-				runtimeClaims.VMConfiguration.VMUniqueID)
-		}
+		return nil, fmt.Errorf("parse runtime claims: %w", err)
+	}
+	log.Printf("Runtime claims parsed: %d keys, user-data length=%d",
+		len(runtimeClaims.Keys), len(runtimeClaims.UserData))
+	if runtimeClaims.VMConfiguration != nil {
+		log.Printf("VM config: secure-boot=%v, tpm-enabled=%v, vmUniqueId=%s",
+			runtimeClaims.VMConfiguration.SecureBoot,
+			runtimeClaims.VMConfiguration.TPMEnabled,
+			runtimeClaims.VMConfiguration.VMUniqueID)
 	}
 
 	return &Evidence{

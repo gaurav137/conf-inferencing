@@ -23,12 +23,12 @@ type AttestRequest struct {
 
 // AttestResponse is the JSON response returned by the /attest endpoint.
 type AttestResponse struct {
-	TPMQuote      string                     `json:"tpmQuote"`                // base64-encoded TPM quote (quoted + signature)
-	HCLReport     string                     `json:"hclReport"`               // base64-encoded HCL report blob
-	SNPReport     string                     `json:"snpReport"`               // base64-encoded AMD SNP attestation report
-	AIKCert       string                     `json:"aikCert"`                 // base64-encoded AIK x.509 certificate (DER)
-	PCRs          map[string]string          `json:"pcrs"`                    // SHA256 PCR values (index -> base64-encoded digest)
-	RuntimeClaims *attestation.RuntimeClaims `json:"runtimeClaims,omitempty"` // parsed runtime claims from HCL report
+	TPMQuote      string                     `json:"tpmQuote"`      // base64-encoded TPM quote (quoted + signature)
+	HCLReport     string                     `json:"hclReport"`     // base64-encoded HCL report blob
+	SNPReport     string                     `json:"snpReport"`     // base64-encoded AMD SNP attestation report
+	AIKCert       string                     `json:"aikCert"`       // base64-encoded AIK x.509 certificate (DER)
+	PCRs          map[string]string          `json:"pcrs"`          // SHA256 PCR values (index -> base64-encoded digest)
+	RuntimeClaims *attestation.RuntimeClaims `json:"runtimeClaims"` // parsed runtime claims from HCL report
 }
 
 func main() {

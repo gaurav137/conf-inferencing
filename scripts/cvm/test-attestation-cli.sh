@@ -22,7 +22,7 @@ REMOTE_BIN="/tmp/attestation-cli"
 REMOTE_DIR="/tmp"
 LOCAL_OUT="tmp/attestation-output"
 
-ARTIFACTS=(tpm_quote.bin hcl_report.bin snp_report.bin aik_cert.der runtime_claims.json)
+ARTIFACTS=(tpm_quote.bin hcl_report.bin snp_report.bin aik_cert.der pcr_values.json runtime_claims.json)
 
 echo "=== Attestation CLI Test ==="
 echo "Target: ${VM_HOST}"
