@@ -82,17 +82,17 @@ type runtimeDataHeader struct {
 
 const runtimeDataHeaderSize = 20 // 5 x uint32
 
-// AllPCRs is the default set of PCR slots (0-23), matching azure-cvm-tooling.
-var AllPCRs = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23}
+// DefaultPCRs is the default set of PCR slots (0-7).
+var DefaultPCRs = []int{0, 1, 2, 3, 4, 5, 6, 7}
 
 // PCRValues maps PCR indices to their SHA256 digest values.
 type PCRValues map[int][]byte
 
 // BuildPCRSelection creates a TPMLPCRSelection for the given PCR indices.
-// If pcrSlots is nil or empty, all 24 PCRs are selected.
+// If pcrSlots is nil or empty, DefaultPCRs are selected.
 func BuildPCRSelection(pcrSlots []int) tpm2.TPMLPCRSelection {
 	if len(pcrSlots) == 0 {
-		pcrSlots = AllPCRs
+		pcrSlots = DefaultPCRs
 	}
 	uints := make([]uint, len(pcrSlots))
 	for i, s := range pcrSlots {
@@ -272,7 +272,7 @@ func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte, pcrSlots []int) (*E
 // alongside the quote for verification.
 func ReadPCRs(tpm transport.TPM, pcrSlots []int) (PCRValues, error) {
 	if len(pcrSlots) == 0 {
-		pcrSlots = AllPCRs
+		pcrSlots = DefaultPCRs
 	}
 	pcrs := make(PCRValues, len(pcrSlots))
 
