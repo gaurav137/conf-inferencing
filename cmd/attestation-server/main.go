@@ -1,16 +1,43 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 
 	"github.com/gaurav137/conf-node/pkg/attestation"
 	"github.com/gaurav137/conf-node/pkg/httputil"
 )
+
+// OrderedMap is an int-keyed map that serializes JSON keys in
+// numerically ascending order (0, 1, 2, … 23).
+type OrderedMap struct {
+	Data map[int]string
+}
+
+func (o OrderedMap) MarshalJSON() ([]byte, error) {
+	keys := make([]int, 0, len(o.Data))
+	for k := range o.Data {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
+	var buf bytes.Buffer
+	buf.WriteString("{")
+	for i, k := range keys {
+		if i > 0 {
+			buf.WriteString(",")
+		}
+		fmt.Fprintf(&buf, `"%d":"%s"`, k, o.Data[k])
+	}
+	buf.WriteString("}")
+	return buf.Bytes(), nil
+}
 
 // AttestRequest is the JSON body expected by the /attest endpoint.
 type AttestRequest struct {
@@ -25,7 +52,7 @@ type AttestResponse struct {
 	HCLReport     string                     `json:"hclReport"`     // base64-encoded HCL report blob
 	SNPReport     string                     `json:"snpReport"`     // base64-encoded AMD SNP attestation report
 	AIKCert       string                     `json:"aikCert"`       // base64-encoded AIK x.509 certificate (DER)
-	PCRs          map[string]string          `json:"pcrs"`          // SHA256 PCR values (index -> base64-encoded digest)
+	PCRs          OrderedMap                 `json:"pcrs"`          // SHA256 PCR values (index -> base64-encoded digest), numerically sorted
 	RuntimeClaims *attestation.RuntimeClaims `json:"runtimeClaims"` // parsed runtime claims from HCL report
 }
 
@@ -98,17 +125,17 @@ func attestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Encode PCR values as string-keyed map for JSON
-	pcrMap := make(map[string]string, len(evidence.PCRs))
+	// Encode PCR values into an OrderedMap for numerically-sorted JSON keys
+	pcrMap := make(map[int]string, len(evidence.PCRs))
 	for idx, digest := range evidence.PCRs {
-		pcrMap[fmt.Sprintf("%d", idx)] = base64.StdEncoding.EncodeToString(digest)
+		pcrMap[idx] = base64.StdEncoding.EncodeToString(digest)
 	}
 
 	resp := AttestResponse{
 		TPMQuote:      base64.StdEncoding.EncodeToString(evidence.TPMQuote),
 		HCLReport:     base64.StdEncoding.EncodeToString(evidence.HCLReport),
 		SNPReport:     base64.StdEncoding.EncodeToString(evidence.SNPReport),
-		PCRs:          pcrMap,
+		PCRs:          OrderedMap{Data: pcrMap},
 		RuntimeClaims: evidence.RuntimeClaims,
 	}
 	if evidence.AIKCert != nil {
