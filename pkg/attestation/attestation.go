@@ -89,7 +89,7 @@ var DefaultPCRs = []int{0, 1, 2, 3, 4, 5, 6, 7}
 type PCRValues map[int][]byte
 
 // BuildPCRSelection creates a TPMLPCRSelection for the given PCR indices.
-// If pcrSlots is nil or empty, DefaultPCRs are selected.
+// If pcrSlots is nil or empty, DefaultPCRs (0-7) are selected.
 func BuildPCRSelection(pcrSlots []int) tpm2.TPMLPCRSelection {
 	if len(pcrSlots) == 0 {
 		pcrSlots = DefaultPCRs
@@ -115,14 +115,14 @@ type Evidence struct {
 	HCLReport     []byte         // Full HCL report blob from NVRAM
 	SNPReport     []byte         // Raw AMD SNP report extracted from HCL report
 	AIKCert       []byte         // AIK x.509 certificate (DER), may be nil
-	PCRs          PCRValues      // SHA256 PCR values (0-23)
+	PCRs          PCRValues      // SHA256 PCR values for selected slots
 	RuntimeClaims *RuntimeClaims // Parsed runtime claims from HCL report, may be nil
 }
 
 // CollectEvidence opens the TPM, reads the Azure-provisioned AIK, generates
 // a TPM Quote over the specified PCRs using the given nonce, and retrieves
 // the HCL/SNP report from vTPM NVRAM.
-// If pcrSlots is nil, all 24 PCRs (0-23) are included.
+// If pcrSlots is nil, the default PCRs (0-7) are included.
 func CollectEvidence(nonce []byte, pcrSlots []int) (*Evidence, error) {
 	// 1. Open TPM
 	tpmDev, err := linuxtpm.Open(TPMDevice)
@@ -141,7 +141,7 @@ func CollectEvidence(nonce []byte, pcrSlots []int) (*Evidence, error) {
 // cryptographic binding between the caller's data and the hardware attestation.
 // This follows the pattern from az-snp-vtpm: write to 0x01400002, wait for
 // HCL firmware regeneration, then read the fresh report from 0x01400001.
-// If pcrSlots is nil, all 24 PCRs (0-23) are included.
+// If pcrSlots is nil, the default PCRs (0-7) are included.
 func CollectEvidenceWithReportData(nonce []byte, reportData []byte, pcrSlots []int) (*Evidence, error) {
 	if len(reportData) != ReportDataSize {
 		return nil, fmt.Errorf("reportData must be exactly %d bytes, got %d", ReportDataSize, len(reportData))
@@ -166,7 +166,7 @@ func CollectEvidenceWithReportData(nonce []byte, reportData []byte, pcrSlots []i
 }
 
 // collectEvidenceFromTPM performs the attestation using an already-opened TPM.
-// If pcrSlots is nil, all 24 PCRs (0-23) are selected.
+// If pcrSlots is nil, the default PCRs (0-7) are selected.
 func collectEvidenceFromTPM(tpm transport.TPM, nonce []byte, pcrSlots []int) (*Evidence, error) {
 	akHandle := tpm2.TPMHandle(AIKPersistentHandle)
 

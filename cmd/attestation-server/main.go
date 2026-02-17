@@ -18,7 +18,7 @@ const defaultNonce = "attestation-nonce-default"
 type AttestRequest struct {
 	ReportData   string `json:"reportData"`             // base64-encoded 64-byte report_data for SNP report
 	Nonce        string `json:"nonce,omitempty"`        // optional base64-encoded nonce for TPM quote (max 32 bytes); defaults to fixed string
-	PCRSelection []int  `json:"pcrSelection,omitempty"` // optional list of PCR indices (0-23); defaults to all 24
+	PCRSelection []int  `json:"pcrSelection,omitempty"` // optional list of PCR indices (0-23); defaults to 0-7
 }
 
 // AttestResponse is the JSON response returned by the /attest endpoint.

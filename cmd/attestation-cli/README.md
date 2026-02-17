@@ -11,7 +11,7 @@ On Azure CVMs, the HCL (Host Compatibility Layer) firmware owns the interface to
 1. Opens the TPM device (`/dev/tpmrm0`)
 2. Reads the Azure-provisioned AIK (Attestation Identity Key) at persistent handle `0x81000003`
 3. Reads the AIK certificate from NV index `0x01C101D0`
-4. Generates a TPM Quote over PCRs 0,7 using the AIK
+4. Generates a TPM Quote over the selected PCRs using the AIK (default: 0-7)
 5. Reads the HCL report from NV index `0x01400001` (contains the SNP report)
 6. Extracts the 1184-byte AMD SNP report (skipping the 32-byte HCL header)
 7. Saves all artifacts to disk
@@ -73,14 +73,22 @@ curl -X POST http://localhost:8900/attest \
   -d '{"reportData":"<base64-encoded-64-bytes>"}'
 ```
 
+To specify custom PCR selection (default is 0-7):
+```bash
+curl -X POST http://localhost:8900/attest \
+  -H "Content-Type: application/json" \
+  -d '{"reportData":"<base64-encoded-64-bytes>", "pcrSelection":[0,1,2,3,4,5,6,7,8,9,10,11]}'
+```
+
 This pattern comes from [az-snp-vtpm](https://github.com/kinvolk/azure-cvm-tooling) which uses the same NV index trigger mechanism.
 
 ### PCR Selection
 
 The Azure attestation client library uses the following PCRs:
 
-- **Linux:** PCRs 0, 1, 2, 3, 4, 5, 6, 7
-- **Windows:** PCRs 0, 1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14
+- **Default (Linux):** PCRs 0, 1, 2, 3, 4, 5, 6, 7
+
+The default PCR selection is 0-7. Use the `-pcrs` flag (CLI) or `pcrSelection` JSON field (server) to override.
 
 | PCR | Measures |
 |-----|----------|
@@ -93,7 +101,7 @@ The Azure attestation client library uses the following PCRs:
 | 6 | Resume from S4/S5 (wake events) |
 | 7 | Secure Boot policy (certificates, variables) |
 
-## Secure Key Release (SKR) Flow
+## Secure Key Release (SKR) Flow with MAA
 
 The SKR flow demonstrates how secrets can be securely released from Azure Key Vault to a verified CVM. The critical design: the ephemeral private key **never leaves the TPM**.
 
