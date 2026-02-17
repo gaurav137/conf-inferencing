@@ -14,7 +14,7 @@ import (
 
 func main() {
 	reportDataFile := flag.String("report-data", "", "path to a 64-byte file to use as report_data (triggers fresh SNP report)")
-	pcrsFlag := flag.String("pcrs", "", "comma-separated list of PCR indices to include (0-23); defaults to 0-7")
+	pcrsFlag := flag.String("pcrs", "", "comma-separated list of PCR indices to include (0-23); defaults to all 24")
 	flag.Parse()
 
 	nonce := []byte("external-verifier-nonce")

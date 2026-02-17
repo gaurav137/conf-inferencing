@@ -11,7 +11,7 @@ On Azure CVMs, the HCL (Host Compatibility Layer) firmware owns the interface to
 1. Opens the TPM device (`/dev/tpmrm0`)
 2. Reads the Azure-provisioned AIK (Attestation Identity Key) at persistent handle `0x81000003`
 3. Reads the AIK certificate from NV index `0x01C101D0`
-4. Generates a TPM Quote over the selected PCRs using the AIK (default: 0-7)
+4. Generates a TPM Quote over the selected PCRs using the AIK (default: all 24, PCRs 0-23)
 5. Reads the HCL report from NV index `0x01400001` (contains the SNP report)
 6. Extracts the 1184-byte AMD SNP report (skipping the 32-byte HCL header)
 7. Saves all artifacts to disk
@@ -73,11 +73,11 @@ curl -X POST http://localhost:8900/attest \
   -d '{"reportData":"<base64-encoded-64-bytes>"}'
 ```
 
-To specify custom PCR selection (default is 0-7):
+To specify custom PCR selection (default is all 24 PCRs, 0-23):
 ```bash
 curl -X POST http://localhost:8900/attest \
   -H "Content-Type: application/json" \
-  -d '{"reportData":"<base64-encoded-64-bytes>", "pcrSelection":[0,1,2,3,4,5,6,7,8,9,10,11]}'
+  -d '{"reportData":"<base64-encoded-64-bytes>", "pcrSelection":[0,1,2,3,4,5,6,7]}'
 ```
 
 This pattern comes from [az-snp-vtpm](https://github.com/kinvolk/azure-cvm-tooling) which uses the same NV index trigger mechanism.
@@ -86,9 +86,9 @@ This pattern comes from [az-snp-vtpm](https://github.com/kinvolk/azure-cvm-tooli
 
 The Azure attestation client library uses the following PCRs:
 
-- **Default (Linux):** PCRs 0, 1, 2, 3, 4, 5, 6, 7
+- **Default:** PCRs 0-23 (all 24 slots)
 
-The default PCR selection is 0-7. Use the `-pcrs` flag (CLI) or `pcrSelection` JSON field (server) to override.
+The default PCR selection is all 24 (0-23), matching [azure-cvm-tooling](https://github.com/kinvolk/azure-cvm-tooling). Use the `-pcrs` flag (CLI) or `pcrSelection` JSON field (server) to override.
 
 | PCR | Measures |
 |-----|----------|
