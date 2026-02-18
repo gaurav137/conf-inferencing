@@ -64,7 +64,6 @@ PUBLIC_IP=$(az vm show \
 echo "  Public IP: ${PUBLIC_IP}"
 echo "  SSH:       ssh ${ADMIN_USER}@${PUBLIC_IP}"
 echo ""
-echo "  Test CLI:    ./scripts/cvm/test-cvm-attestation-cli.sh ${ADMIN_USER}@${PUBLIC_IP}"
-echo "  Test Server: ./scripts/cvm/test-cvm-attestation-service.sh ${ADMIN_USER}@${PUBLIC_IP}"
+echo "  Test: ./scripts/cvm/test-cvm-attestation-service.sh ${ADMIN_USER}@${PUBLIC_IP}"
 echo ""
 echo "Done."

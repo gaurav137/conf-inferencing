@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Test script for cvm-attestation-service on Azure CVM
-# Generates an RSA key pair, uses SHA256(public key DER) as report_data,
-# starts the attestation service on the CVM, calls POST /attest with the
-# report_data, and validates the runtime claims user-data matches the
-# public key hash.
+# Test script for cvm-attestation-service running as a Docker container on Azure CVM.
+# Builds the Docker image locally, exports it as a tarball, copies it to the CVM,
+# loads it, runs the container with TPM device access, calls POST /attest,
+# validates the runtime claims user-data, then runs the cvm-attestation-verifier
+# locally and verifies the collected evidence passes all checks.
 #
-# Usage: ./scripts/cvm/test-cvm-attestation-service.sh <user@host> [ssh-key]
+# Usage: ./scripts/cvm/test-cvm-attestation-service-container.sh <user@host> [ssh-key]
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <user@host> [ssh-key]" >&2
@@ -18,26 +18,48 @@ VM_HOST="$1"
 SSH_KEY="${2:-~/.ssh/id_rsa}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
-BINARY="bin/cvm-attestation-service"
-HELPER_SCRIPT="scripts/cvm/test-cvm-attestation-service-helper.sh"
-REMOTE_BIN="/tmp/cvm-attestation-service"
-REMOTE_HELPER="/tmp/test-cvm-attestation-service-helper.sh"
+TEST_TAG="test"
+
+SERVER_IMAGE_NAME="cvm-attestation-service"
+SERVER_IMAGE_TAR="tmp/cvm-attestation-service-image.tar.gz"
+SERVER_CONTAINER_NAME="cvm-attestation-service-test"
 SERVER_PORT="8900"
-LOCAL_OUT="tmp/cvm-attestation-service-output"
+LOCAL_OUT="tmp/cvm-attestation-service-container-output"
 
-# Extract just the hostname/IP from user@host
-VM_IP="${VM_HOST#*@}"
+VERIFIER_IMAGE_NAME="cvm-attestation-verifier"
+VERIFIER_CONTAINER_NAME="cvm-attestation-verifier-test"
+VERIFIER_PORT="8902"
 
-echo "=== CVM Attestation Service Test ==="
+# 0. Clean up generated content from previous runs
+echo "--- Cleaning up previous run artifacts ---"
+rm -rf "${LOCAL_OUT}"
+rm -f "${SERVER_IMAGE_TAR}"
+docker rm -f "${SERVER_CONTAINER_NAME}" 2>/dev/null || true
+docker rm -f "${VERIFIER_CONTAINER_NAME}" 2>/dev/null || true
+echo "  Done"
+echo ""
+
+echo "=== CVM Attestation Service Container Test ==="
 echo "Target: ${VM_HOST}"
 echo ""
 
-# 1. Build
-echo "--- Building cvm-attestation-service ---"
-make cvm-attestation-service
+# 1. Build Docker images
+echo "--- Building cvm-attestation-service Docker image ---"
+docker build -t "${SERVER_IMAGE_NAME}:${TEST_TAG}" -f Dockerfile.cvm-attestation-service .
 echo ""
 
-# 2. Generate RSA key pair and compute report_data = SHA256(pubkey DER) || zeros
+echo "--- Building cvm-attestation-verifier Docker image ---"
+docker build -t "${VERIFIER_IMAGE_NAME}:${TEST_TAG}" -f Dockerfile.cvm-attestation-verifier .
+echo ""
+
+# 2. Export image as tarball
+echo "--- Exporting Docker image ---"
+mkdir -p tmp
+docker save "${SERVER_IMAGE_NAME}:${TEST_TAG}" | gzip > "${SERVER_IMAGE_TAR}"
+echo "  Image saved to ${SERVER_IMAGE_TAR} ($(du -h "${SERVER_IMAGE_TAR}" | cut -f1))"
+echo ""
+
+# 3. Generate RSA key pair and compute report_data = SHA256(pubkey DER) || zeros
 echo "--- Generating RSA key pair ---"
 mkdir -p "${LOCAL_OUT}"
 RSA_PRIVATE="${LOCAL_OUT}/priv_key.pem"
@@ -62,32 +84,112 @@ NONCE_B64=$(openssl rand -base64 32)
 echo "  nonce (base64): ${NONCE_B64}"
 echo ""
 
-# 3. Upload server binary and helper script to CVM
-echo "--- Uploading binary and helper script ---"
-scp ${SSH_OPTS} "${BINARY}" "${VM_HOST}:${REMOTE_BIN}"
-scp ${SSH_OPTS} "${HELPER_SCRIPT}" "${VM_HOST}:${REMOTE_HELPER}"
-ssh ${SSH_OPTS} "${VM_HOST}" "chmod +x ${REMOTE_BIN} ${REMOTE_HELPER}"
+# 4. Upload image tarball to CVM
+echo "--- Uploading Docker image to CVM ---"
+scp ${SSH_OPTS} "${SERVER_IMAGE_TAR}" "${VM_HOST}:/tmp/cvm-attestation-service-image.tar.gz"
 echo ""
 
-# 4. Write request JSON on the CVM
+# 5. Install Docker on CVM if needed, load image, and run container
+echo "--- Setting up container on CVM ---"
+ssh ${SSH_OPTS} "${VM_HOST}" bash -s <<'REMOTE_SETUP'
+set -euo pipefail
+
+# Install Docker if not present
+if ! command -v docker &>/dev/null; then
+    echo "  Installing Docker..."
+    curl -fsSL https://get.docker.com | sudo sh
+    sudo usermod -aG docker $USER
+fi
+
+# Stop and remove any existing test container
+sudo docker rm -f cvm-attestation-service-test 2>/dev/null || true
+
+# Load the image
+echo "  Loading Docker image..."
+sudo docker load < /tmp/cvm-attestation-service-image.tar.gz
+
+echo "  Docker image loaded"
+sudo docker images cvm-attestation-service
+REMOTE_SETUP
+echo ""
+
+# 6. Write request JSON on the CVM
 echo "--- Preparing request ---"
 ssh ${SSH_OPTS} "${VM_HOST}" "printf '%s' '{\"reportData\":\"${REPORT_DATA_B64}\",\"nonce\":\"${NONCE_B64}\"}' > /tmp/attest_request.json"
 echo "  Request JSON written to CVM:/tmp/attest_request.json"
 echo ""
 
-# 5. Run helper script on CVM (starts server, calls API, stops server — all in one SSH call)
-echo "--- Running attestation on CVM ---"
-ssh ${SSH_OPTS} "${VM_HOST}" "sudo ${REMOTE_HELPER} /tmp/attest_request.json /tmp/attest_response.json ${SERVER_PORT}"
+# 7. Run container with TPM access, call API, collect response
+echo "--- Running attestation container on CVM ---"
+ssh ${SSH_OPTS} "${VM_HOST}" bash -s <<REMOTE_RUN
+set -euo pipefail
+
+# Start the container with TPM device access
+echo "  Starting container..."
+sudo docker run -d \
+    --name ${SERVER_CONTAINER_NAME} \
+    --device /dev/tpmrm0:/dev/tpmrm0 \
+    -p ${SERVER_PORT}:${SERVER_PORT} \
+    ${SERVER_IMAGE_NAME}:${TEST_TAG}
+
+# Wait for server to be ready (up to 10 seconds)
+echo "  Waiting for server to start..."
+for i in \$(seq 1 20); do
+    if curl -sf -o /dev/null http://localhost:${SERVER_PORT}/attest -X POST -d '{}' 2>/dev/null; then
+        break
+    fi
+    if ! sudo docker ps -q -f name=${SERVER_CONTAINER_NAME} | grep -q .; then
+        echo "  ERROR: Container exited unexpectedly. Logs:"
+        sudo docker logs ${SERVER_CONTAINER_NAME} 2>&1
+        exit 1
+    fi
+    sleep 0.5
+done
+
+# Verify container is running
+if ! sudo docker ps -q -f name=${SERVER_CONTAINER_NAME} | grep -q .; then
+    echo "  ERROR: Container not running. Logs:"
+    sudo docker logs ${SERVER_CONTAINER_NAME} 2>&1
+    exit 1
+fi
+echo "  Container is running"
+
+# Call POST /attest
+echo "  Calling POST /attest ..."
+sudo rm -f /tmp/attest_response.json
+HTTP_CODE=\$(curl -s -w '%{http_code}' -o /tmp/attest_response.json \
+    -X POST "http://localhost:${SERVER_PORT}/attest" \
+    -H 'Content-Type: application/json' \
+    -d @/tmp/attest_request.json)
+
+echo "  HTTP status: \${HTTP_CODE}"
+
+# Show container logs
+echo "  Container logs:"
+sudo docker logs ${SERVER_CONTAINER_NAME} 2>&1 | sed 's/^/    /'
+
+# Stop container
+sudo docker rm -f ${SERVER_CONTAINER_NAME} 2>/dev/null || true
+echo "  Container stopped"
+
+if [[ "\${HTTP_CODE}" != "200" ]]; then
+    echo "  ERROR: attestation request failed"
+    cat /tmp/attest_response.json 2>/dev/null || true
+    exit 1
+fi
+
+echo "  Response saved to CVM:/tmp/attest_response.json"
+REMOTE_RUN
 echo ""
 
-# 6. Download response
+# 8. Download response
 echo "--- Downloading response ---"
 RESPONSE_FILE="${LOCAL_OUT}/attest_response.json"
 scp ${SSH_OPTS} "${VM_HOST}:/tmp/attest_response.json" "${RESPONSE_FILE}"
 echo "  Response saved to ${RESPONSE_FILE}"
 echo ""
 
-# 7. Extract and save individual artifacts
+# 9. Extract and save individual artifacts
 echo "--- Extracting artifacts ---"
 if command -v jq &>/dev/null; then
     jq -r '.tpmQuote' "${RESPONSE_FILE}" | base64 -d > "${LOCAL_OUT}/tpm_quote.bin" 2>/dev/null && \
@@ -96,11 +198,10 @@ if command -v jq &>/dev/null; then
         echo "  hcl_report.bin ($(wc -c < "${LOCAL_OUT}/hcl_report.bin") bytes)"
     jq -r '.snpReport' "${RESPONSE_FILE}" | base64 -d > "${LOCAL_OUT}/snp_report.bin" 2>/dev/null && \
         echo "  snp_report.bin ($(wc -c < "${LOCAL_OUT}/snp_report.bin") bytes)"
-    AIK_CERT=$(jq -r '.aikCert // empty' "${RESPONSE_FILE}")
-    if [[ -n "${AIK_CERT}" ]]; then
-        echo "${AIK_CERT}" | base64 -d > "${LOCAL_OUT}/aik_cert.der" 2>/dev/null && \
-            echo "  aik_cert.der ($(wc -c < "${LOCAL_OUT}/aik_cert.der") bytes)"
-    fi
+    jq -r '.aikCert' "${RESPONSE_FILE}" | base64 -d > "${LOCAL_OUT}/aik_cert.der" 2>/dev/null && \
+        echo "  aik_cert.der ($(wc -c < "${LOCAL_OUT}/aik_cert.der") bytes)"
+    jq '.pcrs' "${RESPONSE_FILE}" > "${LOCAL_OUT}/pcr_values.json" 2>/dev/null && \
+        echo "  pcr_values.json"
     jq '.runtimeClaims' "${RESPONSE_FILE}" > "${LOCAL_OUT}/runtime_claims.json" 2>/dev/null && \
         echo "  runtime_claims.json"
 else
@@ -108,12 +209,12 @@ else
 fi
 echo ""
 
-# 8. Summary
+# 10. Summary
 echo "--- Artifacts ---"
 ls -lh "${LOCAL_OUT}/"
 echo ""
 
-# 9. Validate runtime claims user-data matches public key hash
+# 11. Validate runtime claims user-data matches public key hash
 echo "--- Validating runtime claims ---"
 if [[ -f "${LOCAL_OUT}/runtime_claims.json" ]]; then
     USER_DATA=$(jq -r '."user-data" // .userData // empty' "${LOCAL_OUT}/runtime_claims.json" 2>/dev/null || true)
@@ -144,5 +245,81 @@ if [[ -f "${LOCAL_OUT}/runtime_claims.json" ]]; then
 else
     echo "  WARNING: runtime_claims.json not found, skipping validation"
 fi
+echo ""
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Attestation Verifier
+# ══════════════════════════════════════════════════════════════════════════════
+
+echo "=== Attestation Verifier Test ==="
+echo ""
+
+# 12. Run verifier container locally
+echo "--- Starting cvm-attestation-verifier container ---"
+docker rm -f "${VERIFIER_CONTAINER_NAME}" 2>/dev/null || true
+docker run -d \
+    --name "${VERIFIER_CONTAINER_NAME}" \
+    -p "${VERIFIER_PORT}:8901" \
+    "${VERIFIER_IMAGE_NAME}:${TEST_TAG}"
+
+# Wait for verifier to be ready
+echo "  Waiting for verifier to start..."
+for i in $(seq 1 20); do
+    if curl -sf -o /dev/null "http://localhost:${VERIFIER_PORT}/verify" -X POST -d '{}' 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+echo "  Verifier is running"
+echo ""
+
+# 14. Build verify request from the saved attest response
+echo "--- Building verify request ---"
+VERIFY_REQUEST_FILE="${LOCAL_OUT}/verify_request.json"
+jq -n --slurpfile evidence "${LOCAL_OUT}/attest_response.json" \
+    --arg nonce "${NONCE_B64}" \
+    '{evidence: ($evidence[0] | del(.runtimeClaims)), nonce: $nonce}' \
+    > "${VERIFY_REQUEST_FILE}"
+echo "  Verify request saved to ${VERIFY_REQUEST_FILE}"
+echo ""
+
+# 15. Call POST /verify
+echo "--- Calling POST /verify ---"
+VERIFY_RESPONSE_FILE="${LOCAL_OUT}/verify_response.json"
+HTTP_CODE=$(curl -s -w '%{http_code}' -o "${VERIFY_RESPONSE_FILE}" \
+    -X POST "http://localhost:${VERIFIER_PORT}/verify" \
+    -H 'Content-Type: application/json' \
+    -d @"${VERIFY_REQUEST_FILE}")
+
+echo "  HTTP status: ${HTTP_CODE}"
+
+# Stop verifier container
+docker rm -f "${VERIFIER_CONTAINER_NAME}" 2>/dev/null || true
+echo "  Verifier container stopped"
+echo ""
+
+if [[ "${HTTP_CODE}" != "200" ]]; then
+    echo "  ERROR: verify request failed"
+    cat "${VERIFY_RESPONSE_FILE}" 2>/dev/null || true
+    exit 1
+fi
+
+# 16. Display verification results
+echo "--- Verification Results ---"
+jq '.' "${VERIFY_RESPONSE_FILE}"
+echo ""
+
+# 17. Check overall verdict
+VERIFIED=$(jq -r '.verified' "${VERIFY_RESPONSE_FILE}")
+if [[ "${VERIFIED}" == "true" ]]; then
+    echo "  ✓ PASS: All verification checks passed"
+else
+    echo "  ✗ FAIL: Verification failed"
+    echo ""
+    echo "  Failed checks:"
+    jq -r '.checks | to_entries[] | select(.value.passed == false) | "    \(.key): \(.value.error)"' "${VERIFY_RESPONSE_FILE}"
+    exit 1
+fi
+
 echo ""
 echo "Done."
