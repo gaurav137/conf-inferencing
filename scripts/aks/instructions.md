@@ -86,9 +86,9 @@ Instructions to generate deploy-flex-node-vm.sh
 - Add a taint "pod-policy=required:NoSchedule" on the above node to indicate only pods with a pod policy can be scheduled on it.
 - Add a node selector label on the above node to help pods pick nodes that require pod policy.
 
-Instructions to generate deploy-attestation-cli.sh
+Instructions to generate deploy-cvm-attestation-cli.sh
   - Assume a setup was created previously using deploy-cluster.sh and deploy-flex-node-vm.sh.
-  - Copy the attestation-cli binary inside the Azure VM using ssh so that it can be run locally from within the VM.
+  - Copy the cvm-attestation-cli binary inside the Azure VM using ssh so that it can be run locally from within the VM.
 
 Instructions to generate deploy-kubelet-proxy.sh
   - Assume a setup was created previously using deploy-cluster.sh and deploy-flex-node-vm.sh.

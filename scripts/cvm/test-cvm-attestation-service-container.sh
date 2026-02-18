@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Test script for attestation-server running as a Docker container on Azure CVM.
+# Test script for cvm-attestation-service running as a Docker container on Azure CVM.
 # Builds the Docker image locally, exports it as a tarball, copies it to the CVM,
 # loads it, runs the container with TPM device access, calls POST /attest,
-# validates the runtime claims user-data, then runs the attestation-verifier
+# validates the runtime claims user-data, then runs the cvm-attestation-verifier
 # locally and verifies the collected evidence passes all checks.
 #
-# Usage: ./scripts/cvm/test-attestation-server-container.sh <user@host> [ssh-key]
+# Usage: ./scripts/cvm/test-cvm-attestation-service-container.sh <user@host> [ssh-key]
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <user@host> [ssh-key]" >&2
@@ -20,15 +20,15 @@ SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 TEST_TAG="test"
 
-SERVER_IMAGE_NAME="attestation-server"
-SERVER_IMAGE_TAR="tmp/attestation-server-image.tar.gz"
-SERVER_CONTAINER_NAME="attestation-server-test"
+SERVER_IMAGE_NAME="cvm-attestation-service"
+SERVER_IMAGE_TAR="tmp/cvm-attestation-service-image.tar.gz"
+SERVER_CONTAINER_NAME="cvm-attestation-service-test"
 SERVER_PORT="8900"
-LOCAL_OUT="tmp/attestation-server-container-output"
+LOCAL_OUT="tmp/cvm-attestation-service-container-output"
 
-VERIFIER_IMAGE_NAME="attestation-verifier"
-VERIFIER_CONTAINER_NAME="attestation-verifier-test"
-VERIFIER_PORT="8901"
+VERIFIER_IMAGE_NAME="cvm-attestation-verifier"
+VERIFIER_CONTAINER_NAME="cvm-attestation-verifier-test"
+VERIFIER_PORT="8902"
 
 # 0. Clean up generated content from previous runs
 echo "--- Cleaning up previous run artifacts ---"
@@ -39,17 +39,17 @@ docker rm -f "${VERIFIER_CONTAINER_NAME}" 2>/dev/null || true
 echo "  Done"
 echo ""
 
-echo "=== Attestation Server Container Test ==="
+echo "=== CVM Attestation Service Container Test ==="
 echo "Target: ${VM_HOST}"
 echo ""
 
 # 1. Build Docker images
-echo "--- Building attestation-server Docker image ---"
-docker build -t "${SERVER_IMAGE_NAME}:${TEST_TAG}" -f Dockerfile.attestation-server .
+echo "--- Building cvm-attestation-service Docker image ---"
+docker build -t "${SERVER_IMAGE_NAME}:${TEST_TAG}" -f Dockerfile.cvm-attestation-service .
 echo ""
 
-echo "--- Building attestation-verifier Docker image ---"
-docker build -t "${VERIFIER_IMAGE_NAME}:${TEST_TAG}" -f Dockerfile.attestation-verifier .
+echo "--- Building cvm-attestation-verifier Docker image ---"
+docker build -t "${VERIFIER_IMAGE_NAME}:${TEST_TAG}" -f Dockerfile.cvm-attestation-verifier .
 echo ""
 
 # 2. Export image as tarball
@@ -62,8 +62,8 @@ echo ""
 # 3. Generate RSA key pair and compute report_data = SHA256(pubkey DER) || zeros
 echo "--- Generating RSA key pair ---"
 mkdir -p "${LOCAL_OUT}"
-RSA_PRIVATE="${LOCAL_OUT}/test_key.pem"
-RSA_PUBLIC_PEM="${LOCAL_OUT}/test_key_pub.pem"
+RSA_PRIVATE="${LOCAL_OUT}/priv_key.pem"
+RSA_PUBLIC_PEM="${LOCAL_OUT}/pub_key.pem"
 
 openssl genrsa -out "${RSA_PRIVATE}" 2048 2>/dev/null
 openssl rsa -in "${RSA_PRIVATE}" -pubout -outform PEM -out "${RSA_PUBLIC_PEM}" 2>/dev/null
@@ -86,7 +86,7 @@ echo ""
 
 # 4. Upload image tarball to CVM
 echo "--- Uploading Docker image to CVM ---"
-scp ${SSH_OPTS} "${SERVER_IMAGE_TAR}" "${VM_HOST}:/tmp/attestation-server-image.tar.gz"
+scp ${SSH_OPTS} "${SERVER_IMAGE_TAR}" "${VM_HOST}:/tmp/cvm-attestation-service-image.tar.gz"
 echo ""
 
 # 5. Install Docker on CVM if needed, load image, and run container
@@ -102,14 +102,14 @@ if ! command -v docker &>/dev/null; then
 fi
 
 # Stop and remove any existing test container
-sudo docker rm -f attestation-server-test 2>/dev/null || true
+sudo docker rm -f cvm-attestation-service-test 2>/dev/null || true
 
 # Load the image
 echo "  Loading Docker image..."
-sudo docker load < /tmp/attestation-server-image.tar.gz
+sudo docker load < /tmp/cvm-attestation-service-image.tar.gz
 
 echo "  Docker image loaded"
-sudo docker images attestation-server
+sudo docker images cvm-attestation-service
 REMOTE_SETUP
 echo ""
 
@@ -255,11 +255,11 @@ echo "=== Attestation Verifier Test ==="
 echo ""
 
 # 12. Run verifier container locally
-echo "--- Starting attestation-verifier container ---"
+echo "--- Starting cvm-attestation-verifier container ---"
 docker rm -f "${VERIFIER_CONTAINER_NAME}" 2>/dev/null || true
 docker run -d \
     --name "${VERIFIER_CONTAINER_NAME}" \
-    -p "${VERIFIER_PORT}:${VERIFIER_PORT}" \
+    -p "${VERIFIER_PORT}:8901" \
     "${VERIFIER_IMAGE_NAME}:${TEST_TAG}"
 
 # Wait for verifier to be ready

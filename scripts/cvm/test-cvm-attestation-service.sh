@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Test script for attestation-server on Azure CVM
+# Test script for cvm-attestation-service on Azure CVM
 # Generates an RSA key pair, uses SHA256(public key DER) as report_data,
-# starts the attestation server on the CVM, calls POST /attest with the
+# starts the attestation service on the CVM, calls POST /attest with the
 # report_data, and validates the runtime claims user-data matches the
 # public key hash.
 #
-# Usage: ./scripts/cvm/test-attestation-server.sh <user@host> [ssh-key]
+# Usage: ./scripts/cvm/test-cvm-attestation-service.sh <user@host> [ssh-key]
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <user@host> [ssh-key]" >&2
@@ -18,30 +18,30 @@ VM_HOST="$1"
 SSH_KEY="${2:-~/.ssh/id_rsa}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
-BINARY="bin/attestation-server"
-HELPER_SCRIPT="scripts/cvm/generate-report-local-server.sh"
-REMOTE_BIN="/tmp/attestation-server"
-REMOTE_HELPER="/tmp/generate-report-local-server.sh"
+BINARY="bin/cvm-attestation-service"
+HELPER_SCRIPT="scripts/cvm/test-cvm-attestation-service-helper.sh"
+REMOTE_BIN="/tmp/cvm-attestation-service"
+REMOTE_HELPER="/tmp/test-cvm-attestation-service-helper.sh"
 SERVER_PORT="8900"
-LOCAL_OUT="tmp/attestation-server-output"
+LOCAL_OUT="tmp/cvm-attestation-service-output"
 
 # Extract just the hostname/IP from user@host
 VM_IP="${VM_HOST#*@}"
 
-echo "=== Attestation Server Test ==="
+echo "=== CVM Attestation Service Test ==="
 echo "Target: ${VM_HOST}"
 echo ""
 
 # 1. Build
-echo "--- Building attestation-server ---"
-make attestation-server
+echo "--- Building cvm-attestation-service ---"
+make cvm-attestation-service
 echo ""
 
 # 2. Generate RSA key pair and compute report_data = SHA256(pubkey DER) || zeros
 echo "--- Generating RSA key pair ---"
 mkdir -p "${LOCAL_OUT}"
-RSA_PRIVATE="${LOCAL_OUT}/test_key.pem"
-RSA_PUBLIC_PEM="${LOCAL_OUT}/test_key_pub.pem"
+RSA_PRIVATE="${LOCAL_OUT}/priv_key.pem"
+RSA_PUBLIC_PEM="${LOCAL_OUT}/pub_key.pem"
 
 openssl genrsa -out "${RSA_PRIVATE}" 2048 2>/dev/null
 openssl rsa -in "${RSA_PRIVATE}" -pubout -outform PEM -out "${RSA_PUBLIC_PEM}" 2>/dev/null

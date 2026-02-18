@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Helper script that runs ON the CVM itself.
-# Starts attestation-server, calls POST /attest, saves response, and stops the server.
+# Starts cvm-attestation-service, calls POST /attest, saves response, and stops the server.
 #
 # Usage: sudo ./cvm-attest-helper.sh <request-json-file> <response-json-file> [port]
 
@@ -14,11 +14,11 @@ fi
 REQUEST_FILE="$1"
 RESPONSE_FILE="$2"
 PORT="${3:-8900}"
-SERVER_BIN="/tmp/attestation-server"
-SERVER_LOG="/tmp/attestation-server.log"
+SERVER_BIN="/tmp/cvm-attestation-service"
+SERVER_LOG="/tmp/cvm-attestation-service.log"
 
 # Kill any existing instance
-pkill -x attestation-server 2>/dev/null || true
+pkill -x cvm-attestation-service 2>/dev/null || true
 sleep 1
 
 # Start server in the background (local backgrounding works fine)

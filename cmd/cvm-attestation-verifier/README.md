@@ -1,27 +1,27 @@
-# attestation-verifier
+# cvm-attestation-verifier
 
-REST API server that verifies attestation evidence produced by the `attestation-server`'s `/attest` endpoint. It validates the full Azure CVM trust chain, mirroring the checks performed by the [azure-cvm-tooling](https://github.com/kinvolk/azure-cvm-tooling) Rust crate.
+REST API server that verifies attestation evidence produced by the `cvm-attestation-service`'s `/attest` endpoint. It validates the full Azure CVM trust chain, mirroring the checks performed by the [azure-cvm-tooling](https://github.com/kinvolk/azure-cvm-tooling) Rust crate.
 
 ## Build
 
 ```bash
-make attestation-verifier
+make cvm-attestation-verifier
 ```
 
 Or with Docker:
 
 ```bash
-docker build -t attestation-verifier -f Dockerfile.attestation-verifier .
+docker build -t cvm-attestation-verifier -f Dockerfile.cvm-attestation-verifier .
 ```
 
 ## Usage
 
 ```bash
 # Default: listen on :8901
-./bin/attestation-verifier
+./bin/cvm-attestation-verifier
 
 # Custom address
-./bin/attestation-verifier -addr :9000
+./bin/cvm-attestation-verifier -addr :9000
 ```
 
 ## API
@@ -52,13 +52,13 @@ Verifies attestation evidence and returns per-check results.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `evidence` | object | Yes | The full JSON response from `attestation-server`'s `POST /attest` endpoint. Only `tpmQuote`, `hclReport`, `snpReport`, and `pcrs` are used; `runtimeClaims` is extracted automatically from the HCL report. |
+| `evidence` | object | Yes | The full JSON response from `cvm-attestation-service`'s `POST /attest` endpoint. Only `tpmQuote`, `hclReport`, `snpReport`, and `pcrs` are used; `runtimeClaims` is extracted automatically from the HCL report. |
 | `evidence.tpmQuote` | string | Yes | Base64-encoded TPM quote blob (TPM2B_ATTEST + TPMT_SIGNATURE). |
 | `evidence.hclReport` | string | Yes | Base64-encoded HCL report blob from vTPM NVRAM. Runtime claims (including HCLAkPub) are parsed from this automatically. |
 | `evidence.snpReport` | string | Yes | Base64-encoded 1184-byte AMD SNP attestation report. |
 | `evidence.aikCert` | string | No | Base64-encoded AIK x.509 certificate (DER). |
 | `evidence.pcrs` | object | Yes | SHA256 PCR values as `{ "index": "<base64 digest>", ... }`. |
-| `nonce` | string | Yes | Expected TPM quote nonce (must match the nonce sent to the attestation-server). Base64-encoded bytes or a raw string. |
+| `nonce` | string | Yes | Expected TPM quote nonce (must match the nonce sent to the cvm-attestation-service). Base64-encoded bytes or a raw string. |
 | `product` | string | No | AMD product name for KDS certificate lookup. Defaults to `"Milan"`. Use `"Genoa"` for 4th-gen EPYC. |
 
 #### Response
@@ -137,13 +137,13 @@ AMD Root Key (ARK)          ← self-signed, fetched from AMD KDS
 ## End-to-end example
 
 ```bash
-# 1. Collect evidence from a CVM (attestation-server running on port 8900)
+# 1. Collect evidence from a CVM (cvm-attestation-service running on port 8900)
 NONCE=$(openssl rand -base64 32)
 EVIDENCE=$(curl -s -X POST http://<cvm-ip>:8900/attest \
   -H "Content-Type: application/json" \
   -d "{\"reportData\": \"<base64-64-bytes>\", \"nonce\": \"$NONCE\"}")
 
-# 2. Verify the evidence (attestation-verifier running on port 8901)
+# 2. Verify the evidence (cvm-attestation-verifier running on port 8901)
 curl -s -X POST http://localhost:8901/verify \
   -H "Content-Type: application/json" \
   -d "{

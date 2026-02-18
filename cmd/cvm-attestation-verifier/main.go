@@ -1,9 +1,9 @@
-// attestation-verifier runs a REST API server that verifies attestation
-// evidence produced by the attestation-server's /attest endpoint.
+// cvm-attestation-verifier runs a REST API server that verifies attestation
+// evidence produced by the cvm-attestation-service's /attest endpoint.
 //
 // Usage:
 //
-//	attestation-verifier [-addr :8901]
+//	cvm-attestation-verifier [-addr :8901]
 //
 // Endpoint:
 //
@@ -54,12 +54,12 @@ import (
 
 // VerifyRequest is the JSON body expected by the /verify endpoint.
 type VerifyRequest struct {
-	Evidence Evidence `json:"evidence"`          // attestation-server /attest response
+	Evidence Evidence `json:"evidence"`          // cvm-attestation-service /attest response
 	Nonce    string   `json:"nonce"`             // expected nonce (base64 or raw string)
 	Product  string   `json:"product,omitempty"` // AMD product: "Milan" (default), "Genoa"
 }
 
-// Evidence mirrors the attestation-server's AttestResponse.
+// Evidence mirrors the cvm-attestation-service's AttestResponse.
 // RuntimeClaims are extracted automatically from the HCL report and do not need
 // to be supplied by the caller.
 type Evidence struct {
@@ -80,7 +80,7 @@ func main() {
 
 	http.HandleFunc("/verify", verifyHandler)
 
-	fmt.Printf("attestation-verifier listening on %s\n", *addr)
+	fmt.Printf("cvm-attestation-verifier listening on %s\n", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 

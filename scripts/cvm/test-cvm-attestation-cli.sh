@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Test script for attestation-cli on Azure CVM
+# Test script for cvm-attestation-cli on Azure CVM
 # Generates an RSA key pair, uses SHA256(public key DER) as report_data,
 # runs attestation on the CVM, and validates the runtime claims user-data
 # matches the public key hash.
 #
-# Usage: ./scripts/aks/test-attestation-cli.sh <user@host> [ssh-key]
+# Usage: ./scripts/cvm/test-cvm-attestation-cli.sh <user@host> [ssh-key]
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: $0 <user@host> [ssh-key]" >&2
@@ -17,27 +17,27 @@ VM_HOST="$1"
 SSH_KEY="${2:-~/.ssh/id_rsa}"
 SSH_OPTS="-i ${SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
-BINARY="bin/attestation-cli"
-REMOTE_BIN="/tmp/attestation-cli"
+BINARY="bin/cvm-attestation-cli"
+REMOTE_BIN="/tmp/cvm-attestation-cli"
 REMOTE_DIR="/tmp"
 LOCAL_OUT="tmp/attestation-output"
 
 ARTIFACTS=(tpm_quote.bin hcl_report.bin snp_report.bin aik_cert.der pcr_values.json runtime_claims.json)
 
-echo "=== Attestation CLI Test ==="
+echo "=== CVM Attestation CLI Test ==="
 echo "Target: ${VM_HOST}"
 echo ""
 
 # 1. Build
-echo "--- Building attestation-cli ---"
-make attestation-cli
+echo "--- Building cvm-attestation-cli ---"
+make cvm-attestation-cli
 echo ""
 
 # 2. Generate RSA key pair and compute report_data = SHA256(pubkey DER) || zeros
 echo "--- Generating RSA key pair ---"
 mkdir -p "${LOCAL_OUT}"
-RSA_PRIVATE="${LOCAL_OUT}/test_key.pem"
-RSA_PUBLIC_PEM="${LOCAL_OUT}/test_key_pub.pem"
+RSA_PRIVATE="${LOCAL_OUT}/priv_key.pem"
+RSA_PUBLIC_PEM="${LOCAL_OUT}/pub_key.pem"
 REPORT_DATA_FILE="${LOCAL_OUT}/report_data.bin"
 
 openssl genrsa -out "${RSA_PRIVATE}" 2048 2>/dev/null
@@ -62,7 +62,7 @@ scp ${SSH_OPTS} "${REPORT_DATA_FILE}" "${VM_HOST}:${REMOTE_DIR}/report_data.bin"
 echo ""
 
 # 4. Run on CVM with custom report_data
-echo "--- Running attestation-cli with custom report_data ---"
+echo "--- Running cvm-attestation-cli with custom report_data ---"
 ssh ${SSH_OPTS} "${VM_HOST}" "cd ${REMOTE_DIR} && sudo ${REMOTE_BIN} -report-data ${REMOTE_DIR}/report_data.bin"
 echo ""
 

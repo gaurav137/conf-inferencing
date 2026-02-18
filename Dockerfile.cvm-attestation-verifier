@@ -8,11 +8,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy only the Go source files needed for the build
-COPY cmd/attestation-server/ ./cmd/attestation-server/
+COPY cmd/cvm-attestation-verifier/ ./cmd/cvm-attestation-verifier/
 COPY pkg/ ./pkg/
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /attestation-server ./cmd/attestation-server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /cvm-attestation-verifier ./cmd/cvm-attestation-verifier
 
 # Runtime stage
 FROM alpine:3.19
@@ -22,11 +22,10 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 
 # Copy the binary from builder
-COPY --from=builder /attestation-server /app/attestation-server
+COPY --from=builder /cvm-attestation-verifier /app/cvm-attestation-verifier
 
 # Expose the default port
-EXPOSE 8900
+EXPOSE 8901
 
 # Run the server
-ENTRYPOINT ["/app/attestation-server"]
-CMD ["-addr", ":8900"]
+ENTRYPOINT ["/app/cvm-attestation-verifier"]

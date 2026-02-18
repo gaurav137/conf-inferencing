@@ -63,7 +63,7 @@ This creates a direct cryptographic binding between the caller's data and the ha
 
 **CLI:** Use the `-fresh` flag to trigger this flow (uses `SHA256(nonce)` as report_data):
 ```bash
-./attestation-cli -fresh
+./cvm-attestation-cli -fresh
 ```
 
 **Server:** Send a POST request with a JSON body containing base64-encoded 64-byte `reportData`:
@@ -260,10 +260,10 @@ curl -X POST http://localhost:8900/attest \
 
 ```bash
 # Build
-make attestation-cli
+make cvm-attestation-cli
 
 # Test on a CVM
-./scripts/aks/test-attestation-cli.sh user@<cvm-ip>
+./scripts/cvm/test-cvm-attestation-cli.sh user@<cvm-ip>
 ```
 
 ## CLI equivalent (for reference)

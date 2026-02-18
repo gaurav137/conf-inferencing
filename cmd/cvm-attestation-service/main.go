@@ -62,7 +62,7 @@ func main() {
 
 	http.HandleFunc("/attest", attestHandler)
 
-	fmt.Printf("attestation-server listening on %s\n", *addr)
+	fmt.Printf("cvm-attestation-service listening on %s\n", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }
 
