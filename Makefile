@@ -9,19 +9,17 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 # Binary names
 KUBELET_PROXY := kubelet-proxy
 SIGNING_SERVER := local-signing-server
-CVM_ATTESTATION_SERVICE := cvm-attestation-service
-CVM_ATTESTATION_VERIFIER := cvm-attestation-verifier
 
 # Build flags
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
-.PHONY: all build clean kubelet-proxy local-signing-server cvm-attestation-service cvm-attestation-verifier help release
+.PHONY: all build clean kubelet-proxy local-signing-server help release
 
 ## all: Build all binaries
 all: build
 
 ## build: Build all binaries
-build: kubelet-proxy local-signing-server cvm-attestation-service cvm-attestation-verifier
+build: kubelet-proxy local-signing-server
 
 ## kubelet-proxy: Build the kubelet-proxy binary
 kubelet-proxy:
@@ -34,18 +32,6 @@ local-signing-server:
 	@echo "Building local-signing-server..."
 	@mkdir -p $(BUILD_DIR)
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(SIGNING_SERVER) ./cmd/local-signing-server
-
-## cvm-attestation-service: Build the cvm-attestation-service binary
-cvm-attestation-service:
-	@echo "Building cvm-attestation-service..."
-	@mkdir -p $(BUILD_DIR)
-	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(CVM_ATTESTATION_SERVICE) ./cmd/cvm-attestation-service
-
-## cvm-attestation-verifier: Build the cvm-attestation-verifier binary
-cvm-attestation-verifier:
-	@echo "Building cvm-attestation-verifier..."
-	@mkdir -p $(BUILD_DIR)
-	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(CVM_ATTESTATION_VERIFIER) ./cmd/cvm-attestation-verifier
 
 ## clean: Remove build artifacts
 clean:
@@ -100,34 +86,6 @@ release: clean
 	tar -czf $(DIST_DIR)/local-signing-server-linux-arm64.tar.gz -C $(DIST_DIR) local-signing-server
 	sha256sum $(DIST_DIR)/local-signing-server-linux-arm64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/local-signing-server-linux-arm64.tar.gz.sha256
 	@rm $(DIST_DIR)/local-signing-server
-	
-	@# Build cvm-attestation-service linux/amd64
-	@echo "Building cvm-attestation-service linux/amd64..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST_DIR)/cvm-attestation-service ./cmd/cvm-attestation-service
-	tar -czf $(DIST_DIR)/cvm-attestation-service-linux-amd64.tar.gz -C $(DIST_DIR) cvm-attestation-service
-	sha256sum $(DIST_DIR)/cvm-attestation-service-linux-amd64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/cvm-attestation-service-linux-amd64.tar.gz.sha256
-	@rm $(DIST_DIR)/cvm-attestation-service
-	
-	@# Build cvm-attestation-service linux/arm64
-	@echo "Building cvm-attestation-service linux/arm64..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST_DIR)/cvm-attestation-service ./cmd/cvm-attestation-service
-	tar -czf $(DIST_DIR)/cvm-attestation-service-linux-arm64.tar.gz -C $(DIST_DIR) cvm-attestation-service
-	sha256sum $(DIST_DIR)/cvm-attestation-service-linux-arm64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/cvm-attestation-service-linux-arm64.tar.gz.sha256
-	@rm $(DIST_DIR)/cvm-attestation-service
-	
-	@# Build cvm-attestation-verifier linux/amd64
-	@echo "Building cvm-attestation-verifier linux/amd64..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(DIST_DIR)/cvm-attestation-verifier ./cmd/cvm-attestation-verifier
-	tar -czf $(DIST_DIR)/cvm-attestation-verifier-linux-amd64.tar.gz -C $(DIST_DIR) cvm-attestation-verifier
-	sha256sum $(DIST_DIR)/cvm-attestation-verifier-linux-amd64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/cvm-attestation-verifier-linux-amd64.tar.gz.sha256
-	@rm $(DIST_DIR)/cvm-attestation-verifier
-	
-	@# Build cvm-attestation-verifier linux/arm64
-	@echo "Building cvm-attestation-verifier linux/arm64..."
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(DIST_DIR)/cvm-attestation-verifier ./cmd/cvm-attestation-verifier
-	tar -czf $(DIST_DIR)/cvm-attestation-verifier-linux-arm64.tar.gz -C $(DIST_DIR) cvm-attestation-verifier
-	sha256sum $(DIST_DIR)/cvm-attestation-verifier-linux-arm64.tar.gz | cut -d' ' -f1 > $(DIST_DIR)/cvm-attestation-verifier-linux-arm64.tar.gz.sha256
-	@rm $(DIST_DIR)/cvm-attestation-verifier
 	
 	@echo "Release artifacts created in $(DIST_DIR)/"
 	@ls -la $(DIST_DIR)/

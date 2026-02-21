@@ -121,36 +121,6 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
             org.opencontainers.image.description=HTTP REST API server for signing pod specs with ECDSA keys
 
-      - name: Build and push cvm-attestation-service container image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.cvm-attestation-service
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/cvm-attestation-service:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository_owner }}/cvm-attestation-service:latest
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
-            org.opencontainers.image.description=HTTP REST API server for TPM/SNP attestation on Azure Confidential VMs
-
-      - name: Build and push cvm-attestation-verifier container image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.cvm-attestation-verifier
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/cvm-attestation-verifier:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository_owner }}/cvm-attestation-verifier:latest
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
-            org.opencontainers.image.description=HTTP REST API server for verifying TPM/SNP attestation evidence from Azure Confidential VMs
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -167,14 +137,6 @@ jobs:
             dist/local-signing-server-linux-amd64.tar.gz.sha256
             dist/local-signing-server-linux-arm64.tar.gz
             dist/local-signing-server-linux-arm64.tar.gz.sha256
-            dist/cvm-attestation-service-linux-amd64.tar.gz
-            dist/cvm-attestation-service-linux-amd64.tar.gz.sha256
-            dist/cvm-attestation-service-linux-arm64.tar.gz
-            dist/cvm-attestation-service-linux-arm64.tar.gz.sha256
-            dist/cvm-attestation-verifier-linux-amd64.tar.gz
-            dist/cvm-attestation-verifier-linux-amd64.tar.gz.sha256
-            dist/cvm-attestation-verifier-linux-arm64.tar.gz
-            dist/cvm-attestation-verifier-linux-arm64.tar.gz.sha256
             scripts/install.sh
             scripts/uninstall.sh
           body_path: /tmp/release-notes.txt
