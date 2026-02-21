@@ -106,21 +106,6 @@ jobs:
           See the `.sha256` files for checksums.
           NOTES
 
-      - name: Build and push local-signing-server container image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.local-signing-server
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/local-signing-server:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository_owner }}/local-signing-server:latest
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
-            org.opencontainers.image.description=HTTP REST API server for signing pod specs with ECDSA keys
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -133,12 +118,9 @@ jobs:
             dist/kubelet-proxy-linux-amd64.tar.gz.sha256
             dist/kubelet-proxy-linux-arm64.tar.gz
             dist/kubelet-proxy-linux-arm64.tar.gz.sha256
-            dist/local-signing-server-linux-amd64.tar.gz
-            dist/local-signing-server-linux-amd64.tar.gz.sha256
-            dist/local-signing-server-linux-arm64.tar.gz
-            dist/local-signing-server-linux-arm64.tar.gz.sha256
             scripts/install.sh
             scripts/uninstall.sh
+            scripts/signing-tool.sh
           body_path: /tmp/release-notes.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

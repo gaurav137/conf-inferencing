@@ -19,9 +19,8 @@ WORKER_NODE_NAME="${CLUSTER_NAME}-worker"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 TEST_POLICIES_DIR="$PROJECT_ROOT/scripts/pod-policies"
-SIGNING_SERVER_CONTAINER="local-signing-server"
-SIGNING_SERVER_PORT="${SIGNING_SERVER_PORT:-8080}"
-SIGNING_SERVER_URL="${SIGNING_SERVER_URL:-http://localhost:$SIGNING_SERVER_PORT}"
+SIGNING_TOOL="${SCRIPT_DIR}/../signing-tool.sh"
+SIGNING_KEY_DIR="${PROJECT_ROOT}/tmp/signing-keys"
 
 # Test result tracking
 TEST1_RESULT=""
@@ -43,9 +42,9 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Check local-signing-server container is running
-    if ! docker ps --format '{{.Names}}' | grep -q "^${SIGNING_SERVER_CONTAINER}$"; then
-        log_error "Signing server container not running. Run 'make deploy-kind' first."
+    # Check signing keys exist
+    if [[ ! -f "$SIGNING_KEY_DIR/signing-key.pem" ]]; then
+        log_error "Signing keys not found in $SIGNING_KEY_DIR. Run 'make deploy-kind' first."
         exit 1
     fi
     
@@ -55,23 +54,15 @@ check_prerequisites() {
     log_info "Prerequisites OK"
 }
 
-check_signing_server() {
-    log_test "Checking local-signing-server status..."
+check_signing_keys() {
+    log_test "Checking signing keys..."
     echo ""
     
-    docker ps --filter "name=$SIGNING_SERVER_CONTAINER" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-    echo ""
-    
-    # Verify local-signing-server is responding (try HTTPS first, then HTTP)
-    if curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
-        log_info "Local signing server is HEALTHY (HTTPS)"
-        SIGNING_SERVER_URL="https://localhost:$SIGNING_SERVER_PORT"
-    elif curl -sf "http://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
-        log_info "Local signing server is HEALTHY (HTTP)"
-        SIGNING_SERVER_URL="http://localhost:$SIGNING_SERVER_PORT"
+    if [[ -f "$SIGNING_KEY_DIR/signing-key.pem" && -f "$SIGNING_KEY_DIR/signing-cert.pem" ]]; then
+        log_info "Signing keys found in $SIGNING_KEY_DIR"
+        ls -la "$SIGNING_KEY_DIR/"
     else
-        log_error "Local signing server is NOT responding"
-        docker logs "$SIGNING_SERVER_CONTAINER" --tail 20
+        log_error "Signing keys not found in $SIGNING_KEY_DIR"
         exit 1
     fi
     echo ""
@@ -124,18 +115,15 @@ print(json.dumps(sorted_policy, separators=(',', ':')))
 sign_policy() {
     local policy_base64="$1"
     
-    local response
-    # Use --insecure for HTTPS with self-signed cert
-    response=$(curl -sf --insecure -X POST "$SIGNING_SERVER_URL/sign" \
-        -H "Content-Type: application/json" \
-        -d "{\"payload\": $(printf '%s' "$policy_base64" | jq -Rs .)}")
+    local signature
+    signature=$("$SIGNING_TOOL" --key-dir "$SIGNING_KEY_DIR" sign "$policy_base64")
     
-    if [[ $? -ne 0 ]]; then
+    if [[ $? -ne 0 || -z "$signature" ]]; then
         echo ""
         return 1
     fi
     
-    echo "$response" | jq -r '.signature'
+    echo "$signature"
 }
 
 cleanup_test_resources() {
@@ -177,7 +165,7 @@ test_signed_pod() {
     log_info "Policy: $policy_json"
     
     # Sign the policy
-    log_info "Signing policy using local-signing-server..."
+    log_info "Signing policy using signing-tool..."
     local signature
     signature=$(sign_policy "$policy_base64")
     
@@ -505,7 +493,7 @@ test_full_policy_pod() {
     log_info "Policy: $policy_json"
     
     # Sign the policy
-    log_info "Signing policy using local-signing-server..."
+    log_info "Signing policy using signing-tool..."
     local signature
     signature=$(sign_policy "$policy_base64")
     
@@ -912,7 +900,7 @@ test_allowall_pod() {
     log_info "Policy base64: $policy_base64"
     
     # Sign the policy
-    log_info "Signing allowall policy using local-signing-server..."
+    log_info "Signing allowall policy using signing-tool..."
     local signature
     signature=$(sign_policy "$policy_base64")
     
@@ -998,7 +986,7 @@ run_tests() {
     echo ""
     
     check_prerequisites
-    check_signing_server
+    check_signing_keys
     check_proxy_status
     cleanup_test_resources
     test_signed_pod
@@ -1148,7 +1136,7 @@ run_tests() {
 case "${1:-}" in
     --status)
         check_prerequisites
-        check_signing_server
+        check_signing_keys
         check_proxy_status
         ;;
     --cleanup)

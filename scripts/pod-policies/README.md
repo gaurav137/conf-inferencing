@@ -41,7 +41,7 @@ The test script (`scripts/kind/test-pod-policies.sh`) loads these policy files a
 
 1. Compacts the JSON (removes whitespace, sorts keys)
 2. Base64-encodes the compacted JSON
-3. Signs the base64 string using the local-signing-server
+3. Signs the base64 string using `signing-tool.sh`
 4. Creates pod YAML with the policy and signature as annotations
 
 ## Test Scenarios

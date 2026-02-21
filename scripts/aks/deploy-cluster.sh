@@ -72,7 +72,7 @@ set_resource_names() {
     log_info "AKS cluster: $AKS_CLUSTER_NAME"
 }
 
-# Create resource group with SkipCleanup tag
+# Create resource group
 create_resource_group() {
     log_info "Creating resource group: $RESOURCE_GROUP in $LOCATION..."
     
@@ -82,10 +82,9 @@ create_resource_group() {
         az group create \
             --name "$RESOURCE_GROUP" \
             --location "$LOCATION" \
-            --tags SkipCleanup=true \
             --output none
         
-        log_info "Resource group created with SkipCleanup=true tag"
+        log_info "Resource group created"
     fi
 }
 
@@ -136,18 +135,6 @@ create_aks_cluster() {
         --output none 2>/dev/null || log_warn "Role assignment may already exist"
     
     log_info "Current user added as cluster admin"
-    
-    # Tag the MC (managed cluster) resource group with SkipCleanup=true
-    log_info "Setting SkipCleanup tag on MC resource group..."
-    
-    MC_RESOURCE_GROUP=$(az aks show --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --query nodeResourceGroup -o tsv)
-    
-    az group update \
-        --name "$MC_RESOURCE_GROUP" \
-        --tags SkipCleanup=true \
-        --output none
-    
-    log_info "MC resource group ($MC_RESOURCE_GROUP) tagged with SkipCleanup=true"
 }
 
 # Get AKS credentials

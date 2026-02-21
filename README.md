@@ -23,13 +23,16 @@ sudo ./scripts/uninstall.sh
 ## Binaries
 
 - **kubelet-proxy** - Kubernetes kubelet proxy that intercepts API server communication for pod admission control
-- **local-signing-server** - HTTP REST API server for signing pod specs with ECDSA keys
+
+## Scripts
+
+- **signing-tool.sh** - CLI script for generating signing keys and signing pod policies using openssl
 
 ## Prerequisites
 
 - Go 1.21 or later
 - Make
-- Docker (for building local-signing-server container)
+- openssl
 
 ## Building
 
@@ -41,7 +44,6 @@ make build
 Build a specific binary:
 ```bash
 make kubelet-proxy
-make local-signing-server
 ```
 
 ## kubelet-proxy
@@ -160,19 +162,20 @@ Provide a certificate containing the public key:
 
 #### Signing Pods
 
-Pods are signed by generating a policy JSON from the pod spec, base64-encoding it, and signing it via the local-signing-server:
+Pods are signed by generating a policy JSON from the pod spec, base64-encoding it, and signing it via the `signing-tool.sh` script:
 
 ```bash
-# Sign a payload using the local-signing-server
-curl -X POST http://localhost:8080/sign \
-  -H "Content-Type: application/json" \
-  -d '{"payload": "<base64-encoded-policy>"}'
+# Generate signing keys (one-time setup)
+./scripts/signing-tool.sh generate
 
-# Fetch the signing certificate from local-signing-server
-curl http://localhost:8080/signingcert > signing-cert.pem
+# Sign a base64-encoded policy
+./scripts/signing-tool.sh sign "<base64-encoded-policy>"
+
+# Get the signing certificate path
+./scripts/signing-tool.sh cert
 ```
 
-When using the kind deployment, the local-signing-server runs as a local Docker container on port 8080.
+The signing tool uses RSA-PSS (SHA-256) via `openssl` — no HTTP server required.
 
 #### Policy Schema
 
@@ -353,57 +356,39 @@ The kubelet-proxy verifies pods by:
 - **RSA-PSS** (recommended): RSA with PSS padding and SHA-256
 - **ECDSA**: P-256, P-384, P-521 curves (legacy support)
 
-## local-signing-server
+## signing-tool.sh
 
-The local-signing-server is an HTTP REST API server that manages RSA signing keys and signs pod specs using RSA-PSS with SHA-256. It generates a key pair once on startup and holds the private key in memory for the lifetime of the server.
+The `signing-tool.sh` script replaces the previous local-signing-server HTTP service. It uses `openssl` CLI to generate RSA-2048 signing keys and sign payloads using RSA-PSS with SHA-256 — no HTTP server required.
 
-### Endpoints
+### Commands
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check endpoint |
-| `/generatekeys` | POST | Generate ECDSA key pair (auto-generated on startup) |
-| `/sign` | POST | Sign a payload and return base64-encoded signature |
-| `/signingcert` | GET | Return the signing certificate in PEM format |
+| Command | Description |
+|---------|-------------|
+| `generate` | Generate RSA-2048 key pair and self-signed certificate |
+| `sign <base64-payload>` | Sign a base64-encoded payload, output base64 signature |
+| `cert` | Print the path to the signing certificate PEM file |
 
 ### Usage
 
 ```bash
-./bin/local-signing-server --listen-addr :8080
+# Generate keys (one-time, idempotent)
+./scripts/signing-tool.sh generate
+
+# Sign a payload
+./scripts/signing-tool.sh sign "$(echo -n '{"image":"nginx"}' | base64 -w0)"
+
+# Get certificate path
+./scripts/signing-tool.sh cert
 ```
 
-### Docker
-
-Build and run as a container:
-
-```bash
-docker build -t local-signing-server:local -f Dockerfile.local-signing-server .
-docker run -d -p 8080:8080 --name local-signing-server local-signing-server:local
-```
-
-The `make deploy-kind` command automatically builds and runs the local-signing-server container.
-
-### API Examples
-
-Sign a payload:
-```bash
-curl -X POST http://localhost:8080/sign \
-  -H "Content-Type: application/json" \
-  -d '{"payload": "data-to-sign"}'
-```
-
-Get signing certificate:
-```bash
-curl http://localhost:8080/signingcert > signing-cert.pem
-```
+The `make deploy-kind` command automatically calls `signing-tool.sh generate` to create keys.
 
 ## Project Structure
 
 ```
 .
 ├── cmd/
-│   ├── kubelet-proxy/           # kubelet-proxy binary entry point
-│   └── local-signing-server/          # local-signing-server binary entry point
+│   └── kubelet-proxy/           # kubelet-proxy binary entry point
 ├── internal/
 │   └── kubeletproxy/
 │       ├── admission/          # Admission control logic
@@ -415,11 +400,11 @@ curl http://localhost:8080/signingcert > signing-cert.pem
 │       ├── kubeconfig.go       # Kubeconfig parser
 │       └── proxy.go            # HTTP proxy implementation
 ├── scripts/
+│   ├── signing-tool.sh         # CLI signing utility (openssl-based)
 │   └── kind/                   # Kind cluster deployment scripts
 │       ├── deploy-kind.sh      # Deploy to kind cluster
 │       ├── teardown-kind.sh    # Remove kind cluster
 │       └── test-pod-policies.sh  # Test pod policy verification
-├── Dockerfile.local-signing-server   # Dockerfile for local-signing-server
 ├── examples/                   # Example configurations
 ├── pkg/                        # Public library code
 ├── bin/                        # Compiled binaries (generated)
@@ -430,24 +415,23 @@ curl http://localhost:8080/signingcert > signing-cert.pem
 
 ## Testing with Kind
 
-Deploy kubelet-proxy to a kind cluster with local-signing-server running locally:
+Deploy kubelet-proxy to a kind cluster:
 
 ```bash
 # Deploy to kind cluster (2 nodes: control-plane + worker)
-# This also starts local-signing-server as a local Docker container
+# This generates signing keys locally via signing-tool.sh
 make deploy-kind
 
 # Run pod policy verification tests
 make test-kind
 
-# Tear down cluster and stop local-signing-server
+# Tear down cluster
 make teardown-kind
 ```
 
 The kind deployment:
 - Creates a 2-node cluster (control-plane + worker)
-- Runs local-signing-server as a local Docker container on port 8080
-- Fetches the signing certificate from local-signing-server
+- Generates signing keys locally using `signing-tool.sh`
 - Installs kubelet-proxy on the worker node with pod policy verification enabled
 - Configures kubelet to route through the proxy
 
@@ -467,7 +451,7 @@ The AKS deployment:
 - Creates an Azure RBAC-enabled AKS cluster
 - Deploys an Ubuntu 24.04 VM with managed identities for kubelet and resource access
 - Joins the VM to the AKS cluster as a flex node using [AKS Flex Node](https://github.com/gaurav137/AKSFlexNode)
-- Runs local-signing-server as a local Docker container on the VM
+- Generates signing keys locally using `signing-tool.sh`
 - Installs kubelet-proxy with pod policy verification enabled
 - Adds a taint `pod-policy=required:NoSchedule` to the node for policy-required workloads
-- Signs and deploys test pods using the local-signing-server
+- Signs and deploys test pods using `signing-tool.sh`

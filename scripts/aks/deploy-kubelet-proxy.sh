@@ -4,7 +4,7 @@
 #
 # This script deploys kubelet-proxy to an AKS Flex node that was previously
 # set up using deploy-cluster.sh. It:
-# 1. Deploys the local-signing-server as a local Docker container with TLS
+# 1. Generates signing keys using signing-tool.sh
 # 2. Builds the kubelet-proxy binary
 # 3. Copies the binary and signing certificate to the VM via SSH
 # 4. Runs install.sh on the VM to install kubelet-proxy
@@ -17,7 +17,7 @@
 #
 # Prerequisites:
 #   - deploy-cluster.sh must have been run successfully
-#   - Docker must be installed and running
+#   - openssl must be installed
 #   - Go must be installed for building the binary
 #
 
@@ -37,9 +37,8 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 GENERATED_DIR="$SCRIPT_DIR/generated"
-SIGNING_SERVER_IMAGE="local-signing-server:local"
-SIGNING_SERVER_CONTAINER="local-signing-server-aks"
-SIGNING_SERVER_PORT=8443
+SIGNING_TOOL="${SCRIPT_DIR}/../signing-tool.sh"
+SIGNING_KEY_DIR="${PROJECT_ROOT}/tmp/signing-keys"
 PROXY_LISTEN_ADDR="127.0.0.1:6444"
 
 # Get resource names from currently logged in user
@@ -98,63 +97,12 @@ build_binary() {
     log_info "Binary built: bin/kubelet-proxy-linux-amd64"
 }
 
-# Build local-signing-server Docker image
-build_signing_server_image() {
-    log_info "Building local-signing-server container image..."
-    cd "$PROJECT_ROOT"
-    
-    docker build -t "$SIGNING_SERVER_IMAGE" -f Dockerfile.local-signing-server .
-    
-    log_info "Signing server image built: $SIGNING_SERVER_IMAGE"
-}
-
-# Deploy local-signing-server as local Docker container with TLS
-deploy_signing_server() {
-    log_info "Starting local-signing-server as local Docker container with TLS..."
-    
-    # Stop and remove existing container if running
-    docker stop "$SIGNING_SERVER_CONTAINER" 2>/dev/null || true
-    docker rm "$SIGNING_SERVER_CONTAINER" 2>/dev/null || true
-    
-    # Run local-signing-server container with TLS enabled
-    docker run -d \
-        --name "$SIGNING_SERVER_CONTAINER" \
-        -p "$SIGNING_SERVER_PORT:8080" \
-        "$SIGNING_SERVER_IMAGE" \
-        --listen-addr=:8080 \
-        --auto-generate=true \
-        --tls=true \
-        --tls-hosts="localhost,127.0.0.1"
-    
-    # Wait for local-signing-server to be ready
-    log_info "Waiting for local-signing-server to be ready (HTTPS)..."
-    for i in {1..20}; do
-        if curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/health" >/dev/null 2>&1; then
-            log_info "Signing server is running at https://localhost:$SIGNING_SERVER_PORT"
-            return 0
-        fi
-        sleep 0.5
-    done
-    
-    log_error "Signing server failed to start"
-    docker logs "$SIGNING_SERVER_CONTAINER"
-    exit 1
-}
-
-# Download signing certificate from local-signing-server
-download_signing_cert() {
-    log_info "Downloading signing certificate from local-signing-server..."
-    
-    mkdir -p "$GENERATED_DIR"
-    
-    local signing_cert_file="$GENERATED_DIR/signing-cert.pem"
-    curl -sf --insecure "https://localhost:$SIGNING_SERVER_PORT/signingcert" -o "$signing_cert_file" || {
-        log_error "Failed to download signing certificate from local-signing-server"
-        exit 1
-    }
-    
-    log_info "Signing certificate downloaded to: $signing_cert_file"
-    SIGNING_CERT_FILE="$signing_cert_file"
+# Generate signing keys
+generate_signing_keys() {
+    log_info "Generating signing keys using signing-tool.sh..."
+    "$SIGNING_TOOL" --key-dir "$SIGNING_KEY_DIR" generate
+    SIGNING_CERT_FILE=$("$SIGNING_TOOL" --key-dir "$SIGNING_KEY_DIR" cert)
+    log_info "Signing certificate: $SIGNING_CERT_FILE"
 }
 
 # Deploy kubelet-proxy to the Azure VM
@@ -251,9 +199,8 @@ print_summary() {
     log_info "  kubelet-proxy Deployment Summary"
     log_info "=========================================="
     echo ""
-    echo "Signing Server:"
-    echo "  Container:     $SIGNING_SERVER_CONTAINER"
-    echo "  URL:           https://localhost:$SIGNING_SERVER_PORT"
+    echo "Signing Keys:"
+    echo "  Key dir:       $SIGNING_KEY_DIR"
     echo ""
     echo "VM Deployment:"
     echo "  VM Name:       $VM_NAME"
@@ -263,7 +210,6 @@ print_summary() {
     echo "Useful Commands:"
     echo "  View proxy logs:     ssh -i $SSH_PRIVATE_KEY_FILE azureuser@$VM_PUBLIC_IP 'sudo journalctl -u kubelet-proxy -f'"
     echo "  View kubelet logs:   ssh -i $SSH_PRIVATE_KEY_FILE azureuser@$VM_PUBLIC_IP 'sudo journalctl -u kubelet -f'"
-    echo "  Signing server logs: docker logs $SIGNING_SERVER_CONTAINER"
     echo "  Test pod policies:   ./test-pod-policies.sh"
     echo ""
     echo "Pod policy verification is now ENABLED."
@@ -284,7 +230,7 @@ main() {
     
     # Check prerequisites
     command -v az >/dev/null 2>&1 || { log_error "Azure CLI (az) is required but not installed"; exit 1; }
-    command -v docker >/dev/null 2>&1 || { log_error "Docker is required but not installed"; exit 1; }
+    command -v openssl >/dev/null 2>&1 || { log_error "openssl is required but not installed"; exit 1; }
     command -v go >/dev/null 2>&1 || { log_error "Go is required but not installed"; exit 1; }
     command -v kubectl >/dev/null 2>&1 || { log_error "kubectl is required but not installed"; exit 1; }
     
@@ -296,9 +242,7 @@ main() {
     
     # Deploy
     build_binary
-    build_signing_server_image
-    deploy_signing_server
-    download_signing_cert
+    generate_signing_keys
     deploy_to_vm
     verify_deployment
     print_summary

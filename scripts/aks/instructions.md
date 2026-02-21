@@ -4,11 +4,9 @@ Instructions to generate deploy-cluster.sh
 - Use default Azure location as central india unless overridden.
 - Always ensure any help usage in the script is up to date with the changes made per these instructions.
 - Have any generated/downloaded files be placed under a "generated" folder under the folder that has deploy-cluster.sh script.
-- Create a resource group in azure .The resource group name should have the format (<currently logged in username>-flex-test-rg). Set SkipCleanup=true as an ARM tag on the resource group. 
-- SkipCleanup=true ARM tag is only meant for resource groups. Don't apply it on resources.
+- Create a resource group in azure .The resource group name should have the format (<currently logged in username>-flex-test-rg).
 - Creates an Azure RBAC enabled AKS cluster adding the currently logged in user (via az login) as admin on the cluster.
   - The AKS cluster should use the dev/test configuration and is not meant for production.
-  - Sets the SkipCleanup=true ARM tag on the MC resource group that gets created for the AKS cluster created above.
   - Default node VM image size should be Standard_D4ds_v5 unless overridden.
   - Don't set any default kubernetes version and pass in the CLI unless a value is provided.
   - Don't set any default node cound and aass in the CLI unless a value is provided.
@@ -88,7 +86,7 @@ Instructions to generate deploy-flex-node-vm.sh
 
 Instructions to generate deploy-kubelet-proxy.sh
   - Assume a setup was created previously using deploy-cluster.sh and deploy-flex-node-vm.sh.
-  - Deploy the local-signing-server as a local docker container with TLS.
+  - Generate signing keys using scripts/signing-tool.sh.
   - Run scripts/uninstall.sh script to cleanup any previous install.
   - Run scripts/install.sh script in the Azure VM via ssh using the --signing-cert-file and --local-binary options.
 
@@ -96,6 +94,6 @@ Instructions to generate test-pod-policies.sh
 - Assume a setup was created previously using deploy-cluster.sh and deploy-kubelet-proxy.sh.
 - Generate a sample pod yaml that conforms to the nginx-pod-policy.json file present under pod-policies.
   - The sample pod should have the toleration and node selector that was set on the VM node.
-- Using the local-signing-server to sign the nginx-pod-policy.json and have the policy and signature applied as annotations on the pod.
+- Using signing-tool.sh to sign the nginx-pod-policy.json and have the policy and signature applied as annotations on the pod.
 - Apply the pod yaml on the cluster and test that the pod gets scheduled on the Azure VM node and runs successfully
 - Don't cleanup the sample pod so that it can be inspected after the test finishes.

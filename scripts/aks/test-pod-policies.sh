@@ -23,8 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENERATED_DIR="$SCRIPT_DIR/generated"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 POD_POLICIES_DIR="$SCRIPT_DIR/../pod-policies"
-SIGNING_SERVER_PORT=8443
-SIGNING_SERVER_URL="https://localhost:$SIGNING_SERVER_PORT"
+SIGNING_TOOL="${SCRIPT_DIR}/../signing-tool.sh"
+SIGNING_KEY_DIR="${PROJECT_ROOT}/tmp/signing-keys"
 
 # Test result tracking
 TEST1_RESULT=""
@@ -69,15 +69,14 @@ check_prerequisites() {
     log_info "Prerequisites OK"
 }
 
-check_signing_server() {
-    log_test "Checking local-signing-server status..."
+check_signing_keys() {
+    log_test "Checking signing keys..."
     echo ""
     
-    # Verify local-signing-server is responding
-    if curl -sf --insecure "$SIGNING_SERVER_URL/health" >/dev/null 2>&1; then
-        log_info "Local signing server is HEALTHY at $SIGNING_SERVER_URL"
+    if [[ -f "$SIGNING_KEY_DIR/signing-key.pem" && -f "$SIGNING_KEY_DIR/signing-cert.pem" ]]; then
+        log_info "Signing keys found in $SIGNING_KEY_DIR"
     else
-        log_error "Local signing server is NOT responding at $SIGNING_SERVER_URL"
+        log_error "Signing keys not found in $SIGNING_KEY_DIR"
         log_error "Make sure deploy-kubelet-proxy.sh was run successfully"
         exit 1
     fi
@@ -127,18 +126,15 @@ print(json.dumps(sorted_policy, separators=(',', ':')))
 sign_policy() {
     local policy_base64="$1"
     
-    local response
-    # Use --insecure for HTTPS with self-signed cert
-    response=$(curl -sf --insecure -X POST "$SIGNING_SERVER_URL/sign" \
-        -H "Content-Type: application/json" \
-        -d "{\"payload\": $(printf '%s' "$policy_base64" | jq -Rs .)}")
+    local signature
+    signature=$("$SIGNING_TOOL" --key-dir "$SIGNING_KEY_DIR" sign "$policy_base64")
     
-    if [[ $? -ne 0 ]]; then
+    if [[ $? -ne 0 || -z "$signature" ]]; then
         echo ""
         return 1
     fi
     
-    echo "$response" | jq -r '.signature'
+    echo "$signature"
 }
 
 cleanup_test_resources() {
@@ -179,7 +175,7 @@ test_signed_pod() {
     log_info "Policy: $policy_json"
     
     # Sign the policy
-    log_info "Signing policy using local-signing-server..."
+    log_info "Signing policy using signing-tool..."
     local signature
     signature=$(sign_policy "$policy_base64")
     
@@ -513,7 +509,7 @@ test_full_policy_pod() {
     log_info "Policy: $policy_json"
     
     # Sign the policy
-    log_info "Signing policy using local-signing-server..."
+    log_info "Signing policy using signing-tool..."
     local signature
     signature=$(sign_policy "$policy_base64")
     
@@ -920,7 +916,7 @@ test_allowall_pod() {
     log_info "Policy base64: $policy_base64"
     
     # Sign the policy
-    log_info "Signing allowall policy using local-signing-server..."
+    log_info "Signing allowall policy using signing-tool..."
     local signature
     signature=$(sign_policy "$policy_base64")
     
@@ -1000,7 +996,7 @@ run_tests() {
     echo ""
     
     check_prerequisites
-    check_signing_server
+    check_signing_keys
     check_proxy_status
     cleanup_test_resources
     test_signed_pod
@@ -1146,7 +1142,7 @@ run_tests() {
 case "${1:-}" in
     --status)
         check_prerequisites
-        check_signing_server
+        check_signing_keys
         check_proxy_status
         ;;
     --cleanup)
@@ -1160,7 +1156,7 @@ case "${1:-}" in
         echo "Assumes deploy-cluster.sh, deploy-flex-node-vm.sh, and deploy-kubelet-proxy.sh were run previously."
         echo ""
         echo "Options:"
-        echo "  --status     Check signing server and proxy status only"
+        echo "  --status     Check signing keys and proxy status only"
         echo "  --cleanup    Clean up test resources only"
         echo "  --help, -h   Show this help message"
         echo ""
