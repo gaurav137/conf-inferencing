@@ -13,7 +13,7 @@
 #
 # Environment Variables:
 #   LOCATION         Azure region (default: centralindia)
-#   VM_SIZE          VM size (default: Standard_C2as_v5)
+#   VM_SIZE          VM size (default: Standard_DC2as_v5)
 #   VM_IMAGE         VM image (default: Canonical:0001-com-ubuntu-confidential-vm-jammy:22_04-lts-cvm:latest)
 #
 # Prerequisites:

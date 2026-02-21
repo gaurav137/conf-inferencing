@@ -14,7 +14,7 @@ Instructions to generate deploy-cluster.sh
 
 Instructions to generate deploy-flex-node-vm.sh
 - Assume a setup was created previously using deploy-cluster.sh.
-- Create an ubuntu 24.04 Azure VM:
+- Create an Ubuntu 22.04 Confidential VM (Canonical:0001-com-ubuntu-confidential-vm-jammy:22_04-lts-cvm:latest) with vTPM enabled, secure boot enabled, security type ConfidentialVM and OS disk security encryption type VMGuestStateOnly. Default VM size should be Standard_DC2as_v5 unless overridden:
   - VM should have SSH enabled and download the SSH private key file that can be used later to SSH into the VM post creation.
   - VM should have two user assigned managed identities:
     - First one, hence forth referred to to as resource-owner, should have owner access on the resource group that was created above.
