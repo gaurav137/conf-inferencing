@@ -1,13 +1,13 @@
 # Confidential Nodes
 
-A collection of Go binaries for enabling confidential nodes on [AKS Flex Node](https://github.com/gaurav137/AKSFlexNode).
+A collection of Go binaries for enabling confidential nodes on [AKS Flex Node](https://github.com/Azure/AKSFlexNode).
 
 ## Installation on VM Nodes
 
 Use the `install.sh` script with a signing certificate file:
 
 ```bash
-VERSION=v0.0.7
+VERSION=v0.0.11
 curl -fsSL https://github.com/gaurav137/conf-node/releases/download/$VERSION/install.sh | sudo bash -s -- \
   --signing-cert-file /path/to/signing-cert.pem
 ```
@@ -27,10 +27,12 @@ sudo ./scripts/uninstall.sh
 ## Scripts
 
 - **signing-tool.sh** - CLI script for generating signing keys and signing pod policies using openssl
+- **install.sh** - Installation script for kubelet-proxy on Kind and AKS Flex nodes
+- **uninstall.sh** - Uninstallation script to remove kubelet-proxy and restore original kubelet configuration
 
 ## Prerequisites
 
-- Go 1.21 or later
+- Go 1.22 or later
 - Make
 - openssl
 
@@ -144,11 +146,16 @@ kubelet-proxy can verify cryptographic signatures on pod policies to ensure only
 
 #### How It Works
 
-1. The pod spec (`.spec` field) is serialized to canonical JSON (sorted keys, no whitespace)
-2. The JSON is hashed with SHA256
-3. The hash is signed with the private key (ECDSA or RSA)
-4. The base64-encoded signature is stored in the `kubelet-proxy.io/signature` annotation
-5. On the node, kubelet-proxy verifies the signature using the public key from the provided certificate
+1. A **policy JSON** is created from security-relevant fields of the pod spec (image, command, env vars, volume mounts, security context) — not the full pod spec
+2. The policy JSON bytes are hashed with SHA-256
+3. The hash is signed with the private key (RSA-PSS or ECDSA)
+4. The base64-encoded policy is stored in the `kubelet-proxy.io/policy` annotation
+5. The base64-encoded signature is stored in the `kubelet-proxy.io/signature` annotation
+6. On the node, kubelet-proxy:
+   - Decodes the policy from base64
+   - Hashes the decoded policy bytes with SHA-256
+   - Verifies the signature against the hash using the configured signing certificate
+   - Validates that the actual pod spec matches the claimed policy
 
 #### Enabling Pod Policy Verification
 
@@ -383,36 +390,6 @@ The `signing-tool.sh` script replaces the previous local-signing-server HTTP ser
 
 The `make deploy-kind` command automatically calls `signing-tool.sh generate` to create keys.
 
-## Project Structure
-
-```
-.
-├── cmd/
-│   └── kubelet-proxy/           # kubelet-proxy binary entry point
-├── internal/
-│   └── kubeletproxy/
-│       ├── admission/          # Admission control logic
-│       │   ├── admission.go    # Core admission types
-│       │   ├── chain.go        # Chain multiple controllers
-│       │   ├── logging.go      # Logging controller
-│       │   └── verify.go       # Pod policy verification controller
-│       ├── config.go           # Configuration
-│       ├── kubeconfig.go       # Kubeconfig parser
-│       └── proxy.go            # HTTP proxy implementation
-├── scripts/
-│   ├── signing-tool.sh         # CLI signing utility (openssl-based)
-│   └── kind/                   # Kind cluster deployment scripts
-│       ├── deploy-kind.sh      # Deploy to kind cluster
-│       ├── teardown-kind.sh    # Remove kind cluster
-│       └── test-pod-policies.sh  # Test pod policy verification
-├── examples/                   # Example configurations
-├── pkg/                        # Public library code
-├── bin/                        # Compiled binaries (generated)
-├── Makefile
-├── go.mod
-└── README.md
-```
-
 ## Testing with Kind
 
 Deploy kubelet-proxy to a kind cluster:
@@ -448,9 +425,11 @@ make test-aks
 ```
 
 The AKS deployment:
-- Creates an Azure RBAC-enabled AKS cluster
-- Deploys an Ubuntu 24.04 VM with managed identities for kubelet and resource access
-- Joins the VM to the AKS cluster as a flex node using [AKS Flex Node](https://github.com/gaurav137/AKSFlexNode)
+- Creates an AAD-enabled AKS cluster (no Azure RBAC)
+- Deploys an Ubuntu 22.04 Confidential VM (Standard_DC2as_v5) with vTPM and secure boot
+- Creates a single managed identity (kubelet-identity) with Owner role on the AKS cluster
+- Sets up Kubernetes RBAC (system:node-bootstrapper, system:node) for the managed identity
+- Joins the VM to the AKS cluster as a flex node using [AKS Flex Node](https://github.com/Azure/AKSFlexNode) v0.0.10
 - Generates signing keys locally using `signing-tool.sh`
 - Installs kubelet-proxy with pod policy verification enabled
 - Adds a taint `pod-policy=required:NoSchedule` to the node for policy-required workloads
