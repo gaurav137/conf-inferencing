@@ -95,16 +95,20 @@ uninstall() {
     systemctl daemon-reload
 
     if [[ "$SKIP_KUBELET_RESTART" == "false" ]]; then
-        log_info "Restarting kubelet with original configuration..."
-        systemctl restart kubelet
+        if systemctl list-unit-files kubelet.service &>/dev/null && systemctl cat kubelet.service &>/dev/null; then
+            log_info "Restarting kubelet with original configuration..."
+            systemctl restart kubelet
 
-        sleep 3
+            sleep 3
 
-        if systemctl is-active --quiet kubelet; then
-            log_info "kubelet is running with original configuration"
+            if systemctl is-active --quiet kubelet; then
+                log_info "kubelet is running with original configuration"
+            else
+                log_warn "kubelet may have issues after restart"
+                systemctl status kubelet --no-pager || true
+            fi
         else
-            log_warn "kubelet may have issues after restart"
-            systemctl status kubelet --no-pager || true
+            log_warn "kubelet.service not found, skipping kubelet restart"
         fi
     else
         log_warn "Skipping kubelet restart (--skip-kubelet-restart specified)"
