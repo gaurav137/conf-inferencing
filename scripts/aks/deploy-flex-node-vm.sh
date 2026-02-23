@@ -2,8 +2,8 @@
 #
 # Deploy AKS Flex Node VM
 #
-# This script creates an Ubuntu 24.04 Azure VM and joins it as a flex node
-# to an existing AKS cluster created by deploy-cluster.sh.
+# This script creates an Ubuntu 22.04 Confidential Azure VM and joins it as
+# a flex node to an existing AKS cluster created by deploy-cluster.sh.
 #
 # Usage:
 #   ./deploy-flex-node-vm.sh [options]
@@ -45,14 +45,8 @@ PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 get_current_user() {
     log_info "Getting current user information..."
     
-    # Get the currently logged in user's UPN or email
-    CURRENT_USER_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null) || {
-        log_error "Failed to get current user. Make sure you are logged in with 'az login'"
-        exit 1
-    }
-    
     CURRENT_USER_UPN=$(az ad signed-in-user show --query userPrincipalName -o tsv 2>/dev/null) || {
-        log_error "Failed to get current user UPN"
+        log_error "Failed to get current user. Make sure you are logged in with 'az login'"
         exit 1
     }
     
@@ -68,13 +62,11 @@ set_resource_names() {
     RESOURCE_GROUP="${USERNAME}-flex-test-rg"
     AKS_CLUSTER_NAME="${USERNAME}-flex-aks"
     VM_NAME="${USERNAME}-flex-vm"
-    RESOURCE_OWNER_MI_NAME="${USERNAME}-flex-resource-owner-mi"
     KUBELET_MI_NAME="${USERNAME}-flex-kubelet-mi"
     
     log_info "Resource group: $RESOURCE_GROUP"
     log_info "AKS cluster: $AKS_CLUSTER_NAME"
     log_info "VM name: $VM_NAME"
-    log_info "Resource owner managed identity: $RESOURCE_OWNER_MI_NAME"
     log_info "Kubelet managed identity: $KUBELET_MI_NAME"
 }
 
@@ -91,42 +83,8 @@ verify_aks_cluster() {
     log_info "AKS cluster '$AKS_CLUSTER_NAME' found"
 }
 
-# Create user assigned managed identities
-create_managed_identities() {
-    # Create resource-owner managed identity
-    log_info "Creating resource-owner managed identity: $RESOURCE_OWNER_MI_NAME..."
-    
-    if az identity show --resource-group "$RESOURCE_GROUP" --name "$RESOURCE_OWNER_MI_NAME" &>/dev/null; then
-        log_warn "Managed identity $RESOURCE_OWNER_MI_NAME already exists"
-    else
-        az identity create \
-            --resource-group "$RESOURCE_GROUP" \
-            --name "$RESOURCE_OWNER_MI_NAME" \
-            --location "$LOCATION" \
-            --output none
-        
-        log_info "Resource-owner managed identity created"
-    fi
-    
-    # Get the resource-owner managed identity IDs
-    RESOURCE_OWNER_MI_ID=$(az identity show --resource-group "$RESOURCE_GROUP" --name "$RESOURCE_OWNER_MI_NAME" --query id -o tsv)
-    RESOURCE_OWNER_MI_PRINCIPAL_ID=$(az identity show --resource-group "$RESOURCE_GROUP" --name "$RESOURCE_OWNER_MI_NAME" --query principalId -o tsv)
-    RESOURCE_OWNER_MI_CLIENT_ID=$(az identity show --resource-group "$RESOURCE_GROUP" --name "$RESOURCE_OWNER_MI_NAME" --query clientId -o tsv)
-    log_info "Resource-owner MI ID: $RESOURCE_OWNER_MI_ID"
-    
-    # Assign Owner role to resource-owner MI on the resource group
-    log_info "Assigning Owner role to resource-owner MI on resource group..."
-    local rg_id
-    rg_id=$(az group show --name "$RESOURCE_GROUP" --query id -o tsv)
-    az role assignment create \
-        --assignee-object-id "$RESOURCE_OWNER_MI_PRINCIPAL_ID" \
-        --assignee-principal-type ServicePrincipal \
-        --role "Owner" \
-        --scope "$rg_id" \
-        --output none 2>/dev/null || log_warn "Owner role assignment may already exist"
-    log_info "Owner role assigned to resource-owner MI"
-    
-    # Create kubelet managed identity
+# Create kubelet user assigned managed identity
+create_managed_identity() {
     log_info "Creating kubelet managed identity: $KUBELET_MI_NAME..."
     
     if az identity show --resource-group "$RESOURCE_GROUP" --name "$KUBELET_MI_NAME" &>/dev/null; then
@@ -144,12 +102,70 @@ create_managed_identities() {
     # Get the kubelet managed identity IDs
     KUBELET_MI_ID=$(az identity show --resource-group "$RESOURCE_GROUP" --name "$KUBELET_MI_NAME" --query id -o tsv)
     KUBELET_MI_CLIENT_ID=$(az identity show --resource-group "$RESOURCE_GROUP" --name "$KUBELET_MI_NAME" --query clientId -o tsv)
+    KUBELET_MI_PRINCIPAL_ID=$(az identity show --resource-group "$RESOURCE_GROUP" --name "$KUBELET_MI_NAME" --query principalId -o tsv)
     log_info "Kubelet MI ID: $KUBELET_MI_ID"
+    log_info "Kubelet MI Client ID: $KUBELET_MI_CLIENT_ID"
+    log_info "Kubelet MI Principal ID (Object ID): $KUBELET_MI_PRINCIPAL_ID"
+    
+    # Give Owner role on the AKS cluster to the kubelet identity
+    log_info "Assigning Owner role on AKS cluster to kubelet identity..."
+    local aks_id
+    aks_id=$(az aks show --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --query id -o tsv)
+    az role assignment create \
+        --assignee-object-id "$KUBELET_MI_PRINCIPAL_ID" \
+        --assignee-principal-type ServicePrincipal \
+        --role "Owner" \
+        --scope "$aks_id" \
+        --output none 2>/dev/null || log_warn "Owner role assignment may already exist"
+    log_info "Owner role assigned to kubelet identity on AKS cluster"
 }
 
-# Create Ubuntu 24.04 VM with SSH enabled and managed identity
+# Setup Kubernetes RBAC roles for the kubelet identity
+setup_kubernetes_rbac() {
+    log_info "Setting up Kubernetes RBAC roles for kubelet identity..."
+    
+    local SP_OBJECT_ID="$KUBELET_MI_PRINCIPAL_ID"
+    
+    # Create node bootstrapper role binding
+    log_info "Creating node bootstrapper ClusterRoleBinding..."
+    kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aks-flex-node-bootstrapper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node-bootstrapper
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: $SP_OBJECT_ID
+EOF
+    
+    # Create node role binding
+    log_info "Creating node ClusterRoleBinding..."
+    kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aks-flex-node-role
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: User
+  name: $SP_OBJECT_ID
+EOF
+    
+    log_info "Kubernetes RBAC roles configured for kubelet identity"
+}
+
+# Create Ubuntu 22.04 Confidential VM with SSH enabled and managed identity
 create_vm() {
-    log_info "Creating Ubuntu 24.04 VM: $VM_NAME..."
+    log_info "Creating Ubuntu 22.04 Confidential VM: $VM_NAME..."
     
     # Ensure generated directory exists
     mkdir -p "$GENERATED_DIR"
@@ -160,8 +176,8 @@ create_vm() {
     if az vm show --resource-group "$RESOURCE_GROUP" --name "$VM_NAME" &>/dev/null; then
         log_warn "VM $VM_NAME already exists"
     else
-        # Create VM with new SSH key and both managed identities
-        log_info "Creating VM with new SSH key..."
+        # Create Confidential VM with SSH key and kubelet managed identity
+        log_info "Creating Confidential VM with SSH key..."
         az vm create \
             --resource-group "$RESOURCE_GROUP" \
             --name "$VM_NAME" \
@@ -170,7 +186,7 @@ create_vm() {
             --size "$VM_SIZE" \
             --admin-username azureuser \
             --generate-ssh-keys \
-            --assign-identity "$RESOURCE_OWNER_MI_ID" "$KUBELET_MI_ID" \
+            --assign-identity "$KUBELET_MI_ID" \
             --public-ip-sku Standard \
             --enable-vtpm true \
             --security-type ConfidentialVM \
@@ -250,10 +266,8 @@ generate_config_file() {
     "subscriptionId": "$subscription_id",
     "tenantId": "$tenant_id",
     "cloud": "AzurePublicCloud",
-    "azureVm": {
-      "managedIdentity": {
-        "clientId": "$mi_client_id"
-      }
+    "managedIdentity": {
+      "clientId": "$mi_client_id"
     },
     "targetCluster": {
       "resourceId": "$aks_resource_id",
@@ -293,7 +307,9 @@ install_aks_flex_node() {
     }
     
     # Create a temporary setup script
-    local setup_script=$(cat <<'SCRIPT_EOF'
+    local setup_script_file
+    setup_script_file=$(mktemp /tmp/flex-node-setup-XXXXXX.sh)
+    cat > "$setup_script_file" <<'SCRIPT_EOF'
 #!/bin/bash
 set -e
 
@@ -302,6 +318,7 @@ echo "Uninstalling kubelet-proxy if present..."
 if [[ -f /tmp/kubelet-proxy-staging/uninstall.sh ]]; then
     sudo bash /tmp/kubelet-proxy-staging/uninstall.sh || echo "kubelet-proxy uninstall returned non-zero (may not be installed)"
 fi
+
 
 # Function to install Azure CLI with retry for dpkg lock
 install_az_cli() {
@@ -335,20 +352,26 @@ fi
 
 # Login with resource-owner managed identity
 echo "Logging in with managed identity..."
-az login --identity --client-id "$RESOURCE_OWNER_MI_CLIENT_ID"
+az login --identity --client-id "$KUBELET_MI_CLIENT_ID"
 
 # Cleanup previous aks-flex-node setup if any
 echo "Running aks-flex-node uninstall script to cleanup previous setup..."
-curl -fsSL https://gsinhaflexsa.z13.web.core.windows.net/scripts/uninstall.sh | sudo bash -s -- --force
+curl -fsSL https://raw.githubusercontent.com/Azure/AKSFlexNode/refs/tags/v0.0.10/scripts/uninstall.sh | sudo bash -s -- --force
 
 echo "Setup completed successfully"
 SCRIPT_EOF
-)
-    
-    # Replace the placeholder with actual client ID and execute
-    setup_script=$(echo "$setup_script" | sed "s/\$RESOURCE_OWNER_MI_CLIENT_ID/$RESOURCE_OWNER_MI_CLIENT_ID/g")
-    
-    ssh $ssh_opts azureuser@$VM_PUBLIC_IP "$setup_script" || {
+
+    # Replace the placeholder with actual client ID
+    sed -i "s/\$KUBELET_MI_CLIENT_ID/$KUBELET_MI_CLIENT_ID/g" "$setup_script_file"
+
+    scp $ssh_opts "$setup_script_file" azureuser@$VM_PUBLIC_IP:/tmp/flex-node-setup.sh || {
+        rm -f "$setup_script_file"
+        log_error "Failed to copy setup script to VM"
+        exit 1
+    }
+    rm -f "$setup_script_file"
+
+    ssh $ssh_opts azureuser@$VM_PUBLIC_IP "sudo bash /tmp/flex-node-setup.sh" || {
         log_error "Failed to run setup script on VM"
         exit 1
     }
@@ -380,13 +403,15 @@ SCRIPT_EOF
     
     # Now run the install and enable script
     log_info "Running install and enable script on VM..."
-    local install_script=$(cat <<'INSTALL_SCRIPT_EOF'
+    local install_script_file
+    install_script_file=$(mktemp /tmp/flex-node-install-XXXXXX.sh)
+    cat > "$install_script_file" <<'INSTALL_SCRIPT_EOF'
 #!/bin/bash
 set -e
 
 # Run the AKS Flex Node install script
 echo "Running AKS Flex Node install script..."
-curl -fsSL https://gsinhaflexsa.z13.web.core.windows.net/scripts/install.sh | sudo bash -s -- --download-binary-base-url https://gsinhaflexsa.z13.web.core.windows.net
+curl -fsSL https://raw.githubusercontent.com/Azure/AKSFlexNode/refs/tags/v0.0.10/scripts/install.sh | sudo bash
 
 # Enable and start the aks-flex-node-agent service
 echo "Enabling and starting aks-flex-node-agent service..."
@@ -394,7 +419,7 @@ sudo systemctl enable --now aks-flex-node-agent
 
 # Wait for status.json to appear and kubelet to be ready
 echo "Waiting for aks-flex-node to become ready... (use journalctl -u aks-flex-node-agent -f to view logs)"
-status_file="/run/aks-flex-node/status.json"
+status_file="/tmp/aks-flex-node/status.json"
 max_wait=300  # 5 minutes
 wait_interval=10
 elapsed=0
@@ -442,9 +467,15 @@ fi
 
 echo "Install and setup completed successfully"
 INSTALL_SCRIPT_EOF
-)
-    
-    ssh $ssh_opts azureuser@$VM_PUBLIC_IP "$install_script" || {
+
+    scp $ssh_opts "$install_script_file" azureuser@$VM_PUBLIC_IP:/tmp/flex-node-install.sh || {
+        rm -f "$install_script_file"
+        log_error "Failed to copy install script to VM"
+        exit 1
+    }
+    rm -f "$install_script_file"
+
+    ssh $ssh_opts azureuser@$VM_PUBLIC_IP "sudo bash /tmp/flex-node-install.sh" || {
         log_error "Failed to run install script on VM"
         exit 1
     }
@@ -459,9 +490,10 @@ get_aks_credentials() {
     az aks get-credentials \
         --resource-group "$RESOURCE_GROUP" \
         --name "$AKS_CLUSTER_NAME" \
+        --admin \
         --overwrite-existing
     
-    log_info "AKS credentials configured for kubectl"
+    log_info "AKS credentials configured for kubectl (admin)"
 }
 
 # Verify the VM node joined the AKS cluster
@@ -510,7 +542,6 @@ print_summary() {
     echo "VM Image:           $VM_IMAGE"
     echo "VM Size:            $VM_SIZE"
     echo ""
-    echo "Resource Owner MI:  $RESOURCE_OWNER_MI_NAME"
     echo "Kubelet MI:         $KUBELET_MI_NAME"
     echo ""
     echo "Generated Files:"
@@ -555,8 +586,11 @@ main() {
     # Verify AKS cluster exists
     verify_aks_cluster
     
-    # Create resources
-    create_managed_identities
+    # Create kubelet managed identity and setup k8s RBAC
+    create_managed_identity
+    setup_kubernetes_rbac
+    
+    # Create VM and configure
     create_vm
     generate_config_file
     install_aks_flex_node

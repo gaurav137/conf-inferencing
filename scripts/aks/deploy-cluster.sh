@@ -82,28 +82,27 @@ create_resource_group() {
         az group create \
             --name "$RESOURCE_GROUP" \
             --location "$LOCATION" \
+            --tags SkipCleanup=true \
             --output none
         
         log_info "Resource group created"
     fi
 }
 
-# Create AKS cluster with Azure RBAC enabled
+# Create AAD enabled AKS cluster (no Azure RBAC)
 create_aks_cluster() {
     log_info "Creating AKS cluster: $AKS_CLUSTER_NAME..."
     
     if az aks show --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" &>/dev/null; then
         log_warn "AKS cluster $AKS_CLUSTER_NAME already exists"
     else
-        # Build AKS create command with Azure RBAC enabled and dev/test configuration
+        # Build AKS create command with AAD enabled (no Azure RBAC) and dev/test configuration
         local aks_create_cmd="az aks create \
             --resource-group $RESOURCE_GROUP \
             --name $AKS_CLUSTER_NAME \
             --location $LOCATION \
             --node-vm-size $AKS_NODE_VM_SIZE \
             --enable-aad \
-            --enable-azure-rbac \
-            --aad-admin-group-object-ids '' \
             --output none"
         
         # Add node count only if specified
@@ -120,21 +119,6 @@ create_aks_cluster() {
         
         log_info "AKS cluster created"
     fi
-    
-    # Add current user as cluster admin
-    log_info "Adding current user as AKS cluster admin..."
-    
-    # Get the AKS cluster resource ID
-    AKS_ID=$(az aks show --resource-group "$RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --query id -o tsv)
-    
-    # Assign Azure Kubernetes Service RBAC Cluster Admin role to current user
-    az role assignment create \
-        --assignee "$CURRENT_USER_ID" \
-        --role "Azure Kubernetes Service RBAC Cluster Admin" \
-        --scope "$AKS_ID" \
-        --output none 2>/dev/null || log_warn "Role assignment may already exist"
-    
-    log_info "Current user added as cluster admin"
 }
 
 # Get AKS credentials
@@ -144,9 +128,10 @@ get_aks_credentials() {
     az aks get-credentials \
         --resource-group "$RESOURCE_GROUP" \
         --name "$AKS_CLUSTER_NAME" \
+        --admin \
         --overwrite-existing
     
-    log_info "AKS credentials configured for kubectl"
+    log_info "AKS credentials configured for kubectl (admin)"
 }
 
 # Print summary
